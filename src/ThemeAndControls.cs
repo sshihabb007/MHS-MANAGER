@@ -55,16 +55,16 @@ namespace MHSManager
             Button btn = new Button();
             btn.Text = text;
             btn.Width = width;
-            btn.Height = 34;
+            btn.Height = 32;
             btn.FlatStyle = FlatStyle.Flat;
             btn.FlatAppearance.BorderSize = 1;
             btn.FlatAppearance.BorderColor = Border;
             btn.FlatAppearance.MouseOverBackColor = BgInput;
             btn.BackColor = accentTint;
             btn.ForeColor = TextPrimary;
-            btn.Font = FontBold;
+            btn.Font = FontSmall;
             btn.Cursor = Cursors.Hand;
-            btn.Margin = new Padding(0, 0, 6, 0);
+            btn.Margin = new Padding(0, 0, 5, 0);
             return btn;
         }
 
@@ -87,6 +87,43 @@ namespace MHSManager
             lbl.ForeColor = muted ? TextSecondary : TextPrimary;
             lbl.Font = muted ? FontSmall : FontRegular;
             return lbl;
+        }
+
+        public static ToolStripProfessionalRenderer CreateDarkMenuRenderer()
+        {
+            return new MhsDarkMenuRenderer();
+        }
+    }
+
+    public sealed class MhsDarkColorTable : ProfessionalColorTable
+    {
+        public override Color ToolStripDropDownBackground { get { return MhsTheme.BgElevated; } }
+        public override Color ImageMarginGradientBegin { get { return MhsTheme.BgElevated; } }
+        public override Color ImageMarginGradientMiddle { get { return MhsTheme.BgElevated; } }
+        public override Color ImageMarginGradientEnd { get { return MhsTheme.BgElevated; } }
+        public override Color MenuBorder { get { return MhsTheme.Border; } }
+        public override Color MenuItemBorder { get { return MhsTheme.AccentSky; } }
+        public override Color MenuItemSelected { get { return MhsTheme.BgInput; } }
+        public override Color MenuStripGradientBegin { get { return MhsTheme.BgDark; } }
+        public override Color MenuStripGradientEnd { get { return MhsTheme.BgDark; } }
+        public override Color MenuItemSelectedGradientBegin { get { return MhsTheme.BgInput; } }
+        public override Color MenuItemSelectedGradientEnd { get { return MhsTheme.BgInput; } }
+        public override Color MenuItemPressedGradientBegin { get { return MhsTheme.BgSurface; } }
+        public override Color MenuItemPressedGradientEnd { get { return MhsTheme.BgSurface; } }
+        public override Color SeparatorDark { get { return MhsTheme.Border; } }
+        public override Color SeparatorLight { get { return MhsTheme.Border; } }
+    }
+
+    public sealed class MhsDarkMenuRenderer : ToolStripProfessionalRenderer
+    {
+        public MhsDarkMenuRenderer() : base(new MhsDarkColorTable())
+        {
+        }
+
+        protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = e.Item.Enabled ? MhsTheme.TextPrimary : MhsTheme.TextSecondary;
+            base.OnRenderItemText(e);
         }
     }
 
@@ -131,28 +168,7 @@ namespace MHSManager
                 return;
             }
 
-            List<SegmentInfo> copy = new List<SegmentInfo>();
-            if (item.Segments != null)
-            {
-                lock (item.Segments)
-                {
-                    for (int i = 0; i < item.Segments.Count; i++)
-                    {
-                        SegmentInfo s = item.Segments[i];
-                        copy.Add(new SegmentInfo
-                        {
-                            Id = s.Id,
-                            StartByte = s.StartByte,
-                            CurrentByte = s.CurrentByte,
-                            EndByte = s.EndByte,
-                            State = s.State,
-                            SpeedBytesPerSec = s.SpeedBytesPerSec
-                        });
-                    }
-                }
-            }
-
-            _segments = copy;
+            _segments = item.GetSegmentsSnapshot();
             _totalBytes = item.TotalBytes;
             _progressPercent = item.ProgressPercent;
             _status = item.Status;
@@ -310,7 +326,6 @@ namespace MHSManager
                 g.FillRectangle(bg, r);
             }
 
-            // Subtle grid lines
             using (Pen gridPen = new Pen(Color.FromArgb(45, 71, 85, 105), 1f))
             {
                 gridPen.DashStyle = DashStyle.Dot;
@@ -318,7 +333,7 @@ namespace MHSManager
                 g.DrawLine(gridPen, r.Left, r.Top + (r.Height * 2) / 3, r.Right, r.Top + (r.Height * 2) / 3);
             }
 
-            double maxScale = 1024 * 64; // minimum 64 KB/s scale
+            double maxScale = 1024 * 64;
             for (int i = 0; i < _samples.Count; i++)
             {
                 if (_samples[i] * 1.18 > maxScale)
@@ -376,4 +391,3 @@ namespace MHSManager
         }
     }
 }
-

@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -37,6 +38,45 @@ namespace MHSManager
     {
         public const long MinDynamicSplitBytes = 256 * 1024; // 256 KB minimum stealable tail
 
+        public static string EnsureUniqueDiskFileName(string saveDirectory, string desiredFileName)
+        {
+            string clean = CategoryClassifier.SanitizeFileName(desiredFileName);
+            if (string.IsNullOrWhiteSpace(clean))
+            {
+                clean = "download.bin";
+            }
+            if (string.IsNullOrWhiteSpace(saveDirectory))
+            {
+                return clean;
+            }
+
+            string baseName = Path.GetFileNameWithoutExtension(clean);
+            string ext = Path.GetExtension(clean);
+            string candidate = clean;
+            int suffix = 1;
+
+            while (File.Exists(Path.Combine(saveDirectory, candidate)) ||
+                   File.Exists(Path.Combine(saveDirectory, candidate + ".mhspart")))
+            {
+                candidate = string.Format("{0} ({1}){2}", baseName, suffix, ext);
+                suffix++;
+                if (suffix > 9999) break;
+            }
+            return candidate;
+        }
+
+        public static Task<UrlProbeResult> ProbeUrlAsync(
+            string url,
+            string userAgent,
+            string referer,
+            string cookies,
+            string authUser,
+            string authPassword,
+            CancellationToken token)
+        {
+            return ProbeUrlAsync(url, userAgent, referer, cookies, authUser, authPassword, null, token);
+        }
+
         public static async Task<UrlProbeResult> ProbeUrlAsync(
             string url,
             string userAgent,
@@ -44,6 +84,7 @@ namespace MHSManager
             string cookies,
             string authUser,
             string authPassword,
+            AppSettings settings,
             CancellationToken token)
         {
             UrlProbeResult result = new UrlProbeResult
@@ -69,7 +110,7 @@ namespace MHSManager
             try
             {
                 HttpWebRequest req = HttpHelpers.CreateRequest(
-                    url, userAgent, referer, cookies, authUser, authPassword, 15000, false);
+                    url, userAgent, referer, cookies, authUser, authPassword, 15000, false, settings);
                 req.AddRange(0, 0);
 
                 using (token.Register(delegate { try { req.Abort(); } catch { } }))
@@ -96,7 +137,7 @@ namespace MHSManager
                 try
                 {
                     HttpWebRequest req2 = HttpHelpers.CreateRequest(
-                        url, userAgent, referer, cookies, authUser, authPassword, 15000, false);
+                        url, userAgent, referer, cookies, authUser, authPassword, 15000, false, settings);
 
                     using (token.Register(delegate { try { req2.Abort(); } catch { } }))
                     using (HttpWebResponse resp2 = (HttpWebResponse)await req2.GetResponseAsync().ConfigureAwait(false))
@@ -169,11 +210,12 @@ namespace MHSManager
         private readonly TokenBucketLimiter _itemLimiter;
         private readonly Action<DownloadItem> _onProgress;
         private readonly Action<DownloadItem> _onFinished;
+        private readonly Action<DownloadItem, string> _onAutoFileNameDiscovered;
         private readonly CancellationTokenSource _cts;
-        private readonly object _segLock = new object();
         private readonly object _fileLock = new object();
 
         private volatile bool _pauseRequested;
+        private volatile bool _cancelForRemoval;
         private long _lastMetaSaveTicks;
 
         public DownloadItem Item
@@ -186,19 +228,38 @@ namespace MHSManager
             get { return _pauseRequested; }
         }
 
+        public bool IsRemoved
+        {
+            get { return _cancelForRemoval; }
+        }
+
+        public Task ExecutionTask { get; private set; }
+
         public DownloadTaskRunner(
             DownloadItem item,
             AppSettings settings,
             TokenBucketLimiter globalLimiter,
             Action<DownloadItem> onProgress,
             Action<DownloadItem> onFinished)
+            : this(item, settings, globalLimiter, onProgress, onFinished, null)
+        {
+        }
+
+        public DownloadTaskRunner(
+            DownloadItem item,
+            AppSettings settings,
+            TokenBucketLimiter globalLimiter,
+            Action<DownloadItem> onProgress,
+            Action<DownloadItem> onFinished,
+            Action<DownloadItem, string> onAutoFileNameDiscovered)
         {
             _item = item;
-            _settings = settings;
+            _settings = settings ?? new AppSettings();
             _globalLimiter = globalLimiter;
             _itemLimiter = new TokenBucketLimiter(item.MaxSpeedBytesPerSec > 0, item.MaxSpeedBytesPerSec);
             _onProgress = onProgress;
             _onFinished = onFinished;
+            _onAutoFileNameDiscovered = onAutoFileNameDiscovered;
             _cts = new CancellationTokenSource();
         }
 
@@ -220,18 +281,33 @@ namespace MHSManager
             }
         }
 
+        public void RequestCancelForRemoval()
+        {
+            _cancelForRemoval = true;
+            _pauseRequested = true;
+            try
+            {
+                _cts.Cancel();
+            }
+            catch
+            {
+            }
+        }
+
         public Task StartAsync()
         {
-            return Task.Run(async delegate
+            ExecutionTask = Task.Run(async delegate
             {
                 await RunInternalAsync().ConfigureAwait(false);
             });
+            return ExecutionTask;
         }
 
         private async Task RunInternalAsync()
         {
             CancellationToken token = _cts.Token;
             _item.ErrorMessage = null;
+            _item.LastTryUtc = DateTime.UtcNow;
 
             try
             {
@@ -249,7 +325,7 @@ namespace MHSManager
                 {
                     await HlsDownloader.ExecuteAsync(
                         _item,
-                        _settings.DefaultUserAgent,
+                        _settings,
                         _globalLimiter,
                         _itemLimiter,
                         _onProgress,
@@ -257,17 +333,80 @@ namespace MHSManager
                     return;
                 }
 
-                // Try loading saved .mhsmeta checkpoint if .mhspart exists
+                // Try loading saved .mhsmeta checkpoint if .mhspart exists and URL matches
                 TryRestorePartMetadata();
 
-                // Probe URL if we don't know size/capabilities yet or if starting fresh
-                bool hasResumablePart = File.Exists(_item.PartFilePath) &&
-                                        _item.SupportsRanges &&
-                                        _item.TotalBytes > 0 &&
-                                        _item.Segments != null &&
-                                        _item.Segments.Count > 0;
+                bool hasResumablePart;
+                lock (_item.SyncRoot)
+                {
+                    hasResumablePart = File.Exists(_item.PartFilePath) &&
+                                       _item.SupportsRanges &&
+                                       _item.TotalBytes > 0 &&
+                                       _item.Segments != null &&
+                                       _item.Segments.Count > 0;
+                }
 
-                if (!hasResumablePart)
+                if (hasResumablePart)
+                {
+                    _item.Status = DownloadStatus.Probing;
+                    _item.AddLog("Validating remote file before resuming " + _item.Url);
+                    NotifyProgress();
+
+                    UrlProbeResult resumeProbe = await DownloadEngine.ProbeUrlAsync(
+                        _item.Url,
+                        !string.IsNullOrWhiteSpace(_item.UserAgent) ? _item.UserAgent : _settings.DefaultUserAgent,
+                        _item.Referer,
+                        _item.Cookies,
+                        _item.AuthUser,
+                        _item.AuthPassword,
+                        _settings,
+                        token).ConfigureAwait(false);
+
+                    if (!resumeProbe.Success)
+                    {
+                        throw new IOException(resumeProbe.ErrorMessage ?? "Server validation failed during resume.");
+                    }
+
+                    bool sizeChanged = resumeProbe.TotalBytes > 0 && resumeProbe.TotalBytes != _item.TotalBytes;
+                    bool etagChanged = !_item.IgnoreServerModifiedOnResume &&
+                                       !string.IsNullOrWhiteSpace(_item.ETag) &&
+                                       !string.IsNullOrWhiteSpace(resumeProbe.ETag) &&
+                                       !string.Equals(_item.ETag.Trim(), resumeProbe.ETag.Trim(), StringComparison.Ordinal);
+                    bool lastModChanged = !_item.IgnoreServerModifiedOnResume &&
+                                          string.IsNullOrWhiteSpace(_item.ETag) &&
+                                          !string.IsNullOrWhiteSpace(_item.LastModified) &&
+                                          !string.IsNullOrWhiteSpace(resumeProbe.LastModified) &&
+                                          !string.Equals(_item.LastModified.Trim(), resumeProbe.LastModified.Trim(), StringComparison.OrdinalIgnoreCase);
+                    bool rangeLost = !resumeProbe.SupportsRanges;
+
+                    if (sizeChanged || etagChanged || lastModChanged || rangeLost)
+                    {
+                        _item.AddLog("Remote file changed on server; restarting download from beginning.");
+                        try { if (File.Exists(_item.PartFilePath)) File.Delete(_item.PartFilePath); } catch { }
+                        try { if (File.Exists(_item.MetaFilePath)) File.Delete(_item.MetaFilePath); } catch { }
+
+                        lock (_item.SyncRoot)
+                        {
+                            _item.Segments.Clear();
+                            _item.DownloadedBytes = 0;
+                            _item.TotalBytes = resumeProbe.TotalBytes;
+                            _item.SupportsRanges = resumeProbe.SupportsRanges;
+                            _item.ETag = resumeProbe.ETag;
+                            _item.LastModified = resumeProbe.LastModified;
+                        }
+                        hasResumablePart = false;
+                    }
+                    else
+                    {
+                        if (!string.IsNullOrWhiteSpace(resumeProbe.ETag)) _item.ETag = resumeProbe.ETag;
+                        if (!string.IsNullOrWhiteSpace(resumeProbe.LastModified)) _item.LastModified = resumeProbe.LastModified;
+                        _item.AddLog(string.Format(
+                            "Resuming verified partial download ({0} / {1})",
+                            FormattingHelpers.FormatBytes(_item.DownloadedBytes),
+                            FormattingHelpers.FormatBytes(_item.TotalBytes)));
+                    }
+                }
+                else
                 {
                     _item.Status = DownloadStatus.Probing;
                     _item.AddLog("Probing server capabilities for " + _item.Url);
@@ -280,6 +419,7 @@ namespace MHSManager
                         _item.Cookies,
                         _item.AuthUser,
                         _item.AuthPassword,
+                        _settings,
                         token).ConfigureAwait(false);
 
                     if (!probe.Success)
@@ -292,7 +432,7 @@ namespace MHSManager
                         _item.IsHlsStream = true;
                         await HlsDownloader.ExecuteAsync(
                             _item,
-                            _settings.DefaultUserAgent,
+                            _settings,
                             _globalLimiter,
                             _itemLimiter,
                             _onProgress,
@@ -305,25 +445,34 @@ namespace MHSManager
                     _item.ETag = probe.ETag;
                     _item.LastModified = probe.LastModified;
 
-                    if (string.IsNullOrWhiteSpace(_item.FileName) || _item.FileName == "download.bin")
+                    if (!_item.HasExplicitFileName &&
+                        !string.IsNullOrWhiteSpace(probe.SuggestedFileName) &&
+                        !string.Equals(probe.SuggestedFileName, "download.bin", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (!string.IsNullOrWhiteSpace(probe.SuggestedFileName))
+                        if (!string.Equals(_item.FileName, probe.SuggestedFileName, StringComparison.OrdinalIgnoreCase))
                         {
-                            _item.FileName = probe.SuggestedFileName;
+                            if (_onAutoFileNameDiscovered != null)
+                            {
+                                _onAutoFileNameDiscovered(_item, probe.SuggestedFileName);
+                            }
+                            else
+                            {
+                                _item.FileName = _item.OverwriteExisting
+                                    ? CategoryClassifier.SanitizeFileName(probe.SuggestedFileName)
+                                    : DownloadEngine.EnsureUniqueDiskFileName(_item.SaveDirectory, probe.SuggestedFileName);
+                            }
                         }
+                    }
+
+                    if (!Directory.Exists(_item.SaveDirectory))
+                    {
+                        Directory.CreateDirectory(_item.SaveDirectory);
                     }
 
                     _item.AddLog(string.Format(
                         "Server response: Size={0}, Resume/Range={1}",
                         _item.TotalBytes >= 0 ? FormattingHelpers.FormatBytes(_item.TotalBytes) : "Unknown",
                         _item.SupportsRanges ? "Yes (206 Partial Content)" : "No (Single Stream)"));
-                }
-                else
-                {
-                    _item.AddLog(string.Format(
-                        "Resuming partial download ({0} / {1})",
-                        FormattingHelpers.FormatBytes(_item.DownloadedBytes),
-                        FormattingHelpers.FormatBytes(_item.TotalBytes)));
                 }
 
                 if (_item.SupportsRanges && _item.TotalBytes > 0)
@@ -352,7 +501,10 @@ namespace MHSManager
                     _item.Status = DownloadStatus.Error;
                     _item.ErrorMessage = ex.Message;
                     _item.AddLog("ERROR: " + ex.Message);
-                    SavePartMetadataSafe();
+                    if (!_cancelForRemoval)
+                    {
+                        SavePartMetadataSafe();
+                    }
                 }
             }
             finally
@@ -360,7 +512,10 @@ namespace MHSManager
                 _item.CurrentSpeedBytesPerSec = 0;
                 _item.ActiveConnections = 0;
                 ResetActiveSegmentSpeeds();
-                NotifyProgress();
+                if (!_cancelForRemoval)
+                {
+                    NotifyProgress();
+                }
                 if (_onFinished != null)
                 {
                     _onFinished(_item);
@@ -372,6 +527,10 @@ namespace MHSManager
         {
             _item.CurrentSpeedBytesPerSec = 0;
             _item.ActiveConnections = 0;
+            if (_cancelForRemoval)
+            {
+                return;
+            }
             _item.Status = DownloadStatus.Paused;
             _item.AddLog("Download paused; checkpoint saved.");
             SavePartMetadataSafe();
@@ -379,7 +538,7 @@ namespace MHSManager
 
         private void ResetActiveSegmentSpeeds()
         {
-            lock (_segLock)
+            lock (_item.SyncRoot)
             {
                 if (_item.Segments == null) return;
                 for (int i = 0; i < _item.Segments.Count; i++)
@@ -400,11 +559,11 @@ namespace MHSManager
 
         private async Task DownloadSegmentedAsync(bool resuming, CancellationToken token)
         {
-            lock (_segLock)
+            lock (_item.SyncRoot)
             {
                 if (!resuming || _item.Segments == null || _item.Segments.Count == 0)
                 {
-                    InitializeSegments(_item.TotalBytes, _item.MaxConnections);
+                    InitializeSegmentsLocked(_item.TotalBytes, _item.MaxConnections);
                 }
                 else
                 {
@@ -418,7 +577,10 @@ namespace MHSManager
                 RecomputeDownloadedBytesLocked();
             }
 
-            SavePartMetadataSafe();
+            if (!_cancelForRemoval)
+            {
+                SavePartMetadataSafe();
+            }
 
             using (FileStream partStream = new FileStream(
                 _item.PartFilePath,
@@ -474,7 +636,7 @@ namespace MHSManager
             token.ThrowIfCancellationRequested();
 
             // Verify all byte ranges completed
-            lock (_segLock)
+            lock (_item.SyncRoot)
             {
                 RecomputeDownloadedBytesLocked();
                 for (int i = 0; i < _item.Segments.Count; i++)
@@ -492,12 +654,11 @@ namespace MHSManager
             await FinalizeCompletedPartFileAsync(token).ConfigureAwait(false);
         }
 
-        private void InitializeSegments(long totalBytes, int requestedConnections)
+        private void InitializeSegmentsLocked(long totalBytes, int requestedConnections)
         {
             _item.Segments.Clear();
             int count = Math.Max(1, Math.Min(32, requestedConnections));
 
-            // Keep initial segments >= 128 KB so tiny files don't spawn superfluous sockets
             const long minInitialChunk = 128 * 1024;
             if (totalBytes < minInitialChunk)
             {
@@ -528,9 +689,11 @@ namespace MHSManager
 
         private SegmentInfo ClaimOrStealSegment()
         {
-            lock (_segLock)
+            string splitLog = null;
+            SegmentInfo chosen = null;
+
+            lock (_item.SyncRoot)
             {
-                // 1. Claim any pending unstarted/paused segment first
                 for (int i = 0; i < _item.Segments.Count; i++)
                 {
                     SegmentInfo s = _item.Segments[i];
@@ -541,7 +704,6 @@ namespace MHSManager
                     }
                 }
 
-                // 2. Dynamic work-stealing: find active segment with the largest remaining tail >= 256 KB
                 SegmentInfo largest = null;
                 for (int i = 0; i < _item.Segments.Count; i++)
                 {
@@ -574,17 +736,21 @@ namespace MHSManager
                             State = "Connecting"
                         };
                         _item.Segments.Add(stolen);
-                        _item.AddLog(string.Format(
+                        splitLog = string.Format(
                             "Dynamic split: Stole {0} from segment #{1} -> new segment #{2}",
                             FormattingHelpers.FormatBytes(stolen.TotalBytes),
                             largest.Id,
-                            stolen.Id));
-                        return stolen;
+                            stolen.Id);
+                        chosen = stolen;
                     }
                 }
-
-                return null;
             }
+
+            if (splitLog != null)
+            {
+                _item.AddLog(splitLog);
+            }
+            return chosen;
         }
 
         private async Task DownloadSegmentWithRetriesAsync(
@@ -601,7 +767,7 @@ namespace MHSManager
 
                 long rangeStart;
                 long rangeEnd;
-                lock (_segLock)
+                lock (_item.SyncRoot)
                 {
                     rangeStart = seg.CurrentByte;
                     rangeEnd = seg.EndByte;
@@ -625,7 +791,8 @@ namespace MHSManager
                         _item.AuthUser,
                         _item.AuthPassword,
                         25000,
-                        false);
+                        false,
+                        _settings);
 
                     req.AddRange(rangeStart, rangeEnd);
 
@@ -637,7 +804,7 @@ namespace MHSManager
                             throw new IOException("Server ignored HTTP Range header and returned " + (int)resp.StatusCode);
                         }
 
-                        lock (_segLock)
+                        lock (_item.SyncRoot)
                         {
                             seg.State = "Downloading";
                         }
@@ -651,7 +818,7 @@ namespace MHSManager
                             while (!token.IsCancellationRequested)
                             {
                                 long remainingHint;
-                                lock (_segLock)
+                                lock (_item.SyncRoot)
                                 {
                                     remainingHint = seg.EndByte - seg.CurrentByte + 1;
                                 }
@@ -677,7 +844,7 @@ namespace MHSManager
                                 }
 
                                 bool finishedSegment = false;
-                                lock (_segLock)
+                                lock (_item.SyncRoot)
                                 {
                                     long maxAllowed = seg.EndByte - seg.CurrentByte + 1;
                                     if (maxAllowed <= 0)
@@ -732,7 +899,7 @@ namespace MHSManager
                         }
                     }
 
-                    lock (_segLock)
+                    lock (_item.SyncRoot)
                     {
                         if (seg.RemainingBytes <= 0)
                         {
@@ -754,7 +921,7 @@ namespace MHSManager
                         throw new OperationCanceledException(token);
                     }
                     lastException = ex;
-                    lock (_segLock)
+                    lock (_item.SyncRoot)
                     {
                         seg.SpeedBytesPerSec = 0;
                         seg.State = "Retrying";
@@ -770,7 +937,7 @@ namespace MHSManager
                 }
             }
 
-            lock (_segLock)
+            lock (_item.SyncRoot)
             {
                 if (seg.RemainingBytes <= 0)
                 {
@@ -787,7 +954,7 @@ namespace MHSManager
 
         private async Task DownloadSingleStreamAsync(CancellationToken token)
         {
-            lock (_segLock)
+            lock (_item.SyncRoot)
             {
                 _item.Segments.Clear();
                 _item.Segments.Add(new SegmentInfo
@@ -813,7 +980,8 @@ namespace MHSManager
                 _item.AuthUser,
                 _item.AuthPassword,
                 30000,
-                false);
+                false,
+                _settings);
 
             using (token.Register(delegate { try { req.Abort(); } catch { } }))
             using (HttpWebResponse resp = (HttpWebResponse)await req.GetResponseAsync().ConfigureAwait(false))
@@ -822,8 +990,11 @@ namespace MHSManager
             {
                 if (resp.ContentLength > 0)
                 {
-                    _item.TotalBytes = resp.ContentLength;
-                    _item.Segments[0].EndByte = resp.ContentLength - 1;
+                    lock (_item.SyncRoot)
+                    {
+                        _item.TotalBytes = resp.ContentLength;
+                        _item.Segments[0].EndByte = resp.ContentLength - 1;
+                    }
                 }
 
                 byte[] buffer = new byte[65536];
@@ -847,7 +1018,7 @@ namespace MHSManager
                     totalWritten += read;
                     winBytes += read;
 
-                    lock (_segLock)
+                    lock (_item.SyncRoot)
                     {
                         _item.DownloadedBytes = totalWritten;
                         _item.Segments[0].CurrentByte = totalWritten;
@@ -865,12 +1036,15 @@ namespace MHSManager
                 }
 
                 fs.Flush(true);
-                _item.TotalBytes = totalWritten;
-                _item.DownloadedBytes = totalWritten;
-                _item.Segments[0].EndByte = Math.Max(0, totalWritten - 1);
-                _item.Segments[0].CurrentByte = totalWritten;
-                _item.Segments[0].State = "Completed";
-                _item.Segments[0].SpeedBytesPerSec = 0;
+                lock (_item.SyncRoot)
+                {
+                    _item.TotalBytes = totalWritten;
+                    _item.DownloadedBytes = totalWritten;
+                    _item.Segments[0].EndByte = Math.Max(0, totalWritten - 1);
+                    _item.Segments[0].CurrentByte = totalWritten;
+                    _item.Segments[0].State = "Completed";
+                    _item.Segments[0].SpeedBytesPerSec = 0;
+                }
             }
 
             await FinalizeCompletedPartFileAsync(token).ConfigureAwait(false);
@@ -894,27 +1068,55 @@ namespace MHSManager
                     sha256));
             }
 
+            string oldMetaPath = _item.MetaFilePath;
+            string partPath = _item.PartFilePath;
             string target = _item.FullTargetPath;
+
             if (File.Exists(target))
             {
-                File.Delete(target);
+                if (_item.OverwriteExisting)
+                {
+                    File.Delete(target);
+                }
+                else
+                {
+                    _item.FileName = DownloadEngine.EnsureUniqueDiskFileName(_item.SaveDirectory, _item.FileName);
+                    target = _item.FullTargetPath;
+                }
             }
-            File.Move(_item.PartFilePath, target);
+            File.Move(partPath, target);
 
             try
             {
-                if (File.Exists(_item.MetaFilePath))
+                if (File.Exists(oldMetaPath))
                 {
-                    File.Delete(_item.MetaFilePath);
+                    File.Delete(oldMetaPath);
                 }
             }
             catch
             {
             }
 
+            if (_settings != null && _settings.SetServerLastModifiedTime && !string.IsNullOrWhiteSpace(_item.LastModified))
+            {
+                DateTime serverUtc;
+                if (HttpHelpers.TryParseHttpDate(_item.LastModified, out serverUtc))
+                {
+                    try
+                    {
+                        File.SetLastWriteTimeUtc(target, serverUtc);
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
             FileInfo fi = new FileInfo(target);
             _item.TotalBytes = fi.Length;
             _item.DownloadedBytes = fi.Length;
+            _item.RetryCount = 0;
+            _item.NextRetryUtc = null;
             _item.CompletedUtc = DateTime.UtcNow;
             _item.Status = DownloadStatus.Completed;
             _item.ErrorMessage = null;
@@ -941,6 +1143,7 @@ namespace MHSManager
 
         private void MaybeSavePartMetadataPeriodic()
         {
+            if (_cancelForRemoval) return;
             long now = Environment.TickCount & Int32.MaxValue;
             long prev = Interlocked.Read(ref _lastMetaSaveTicks);
             if (now - prev >= 1000)
@@ -953,10 +1156,11 @@ namespace MHSManager
 
         private void SavePartMetadataSafe()
         {
+            if (_cancelForRemoval) return;
             try
             {
                 PartMetadata meta = new PartMetadata();
-                lock (_segLock)
+                lock (_item.SyncRoot)
                 {
                     meta.Url = _item.Url;
                     meta.TotalBytes = _item.TotalBytes;
@@ -981,7 +1185,7 @@ namespace MHSManager
                 JavaScriptSerializer ser = new JavaScriptSerializer();
                 string json = ser.Serialize(meta);
                 string tmp = _item.MetaFilePath + ".tmp";
-                File.WriteAllText(tmp, json);
+                File.WriteAllText(tmp, json, StateRepository.Utf8NoBom);
                 if (File.Exists(_item.MetaFilePath))
                 {
                     File.Delete(_item.MetaFilePath);
@@ -1004,17 +1208,31 @@ namespace MHSManager
                 string json = File.ReadAllText(_item.MetaFilePath);
                 JavaScriptSerializer ser = new JavaScriptSerializer();
                 PartMetadata meta = ser.Deserialize<PartMetadata>(json);
-                if (meta != null && meta.TotalBytes > 0 && meta.Segments != null && meta.Segments.Count > 0)
+                if (meta == null || meta.TotalBytes <= 0 || meta.Segments == null || meta.Segments.Count == 0)
                 {
-                    lock (_segLock)
-                    {
-                        _item.TotalBytes = meta.TotalBytes;
-                        _item.SupportsRanges = meta.SupportsRanges;
-                        _item.ETag = meta.ETag;
-                        _item.LastModified = meta.LastModified;
-                        _item.Segments = meta.Segments;
-                        RecomputeDownloadedBytesLocked();
-                    }
+                    return;
+                }
+
+                if (!string.IsNullOrWhiteSpace(meta.Url) &&
+                    !string.Equals(meta.Url.Trim(), (_item.Url ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                FileInfo partFi = new FileInfo(_item.PartFilePath);
+                if (partFi.Length != meta.TotalBytes)
+                {
+                    return;
+                }
+
+                lock (_item.SyncRoot)
+                {
+                    _item.TotalBytes = meta.TotalBytes;
+                    _item.SupportsRanges = meta.SupportsRanges;
+                    _item.ETag = meta.ETag;
+                    _item.LastModified = meta.LastModified;
+                    _item.Segments = meta.Segments;
+                    RecomputeDownloadedBytesLocked();
                 }
             }
             catch
@@ -1024,11 +1242,10 @@ namespace MHSManager
 
         private void NotifyProgress()
         {
-            if (_onProgress != null)
+            if (_onProgress != null && !_cancelForRemoval)
             {
                 _onProgress(_item);
             }
         }
     }
 }
-

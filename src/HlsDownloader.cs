@@ -16,14 +16,23 @@ namespace MHSManager
     {
         public int Index { get; set; }
         public string Url { get; set; }
+        public bool IsInitMap { get; set; }
         public long MediaSequence { get; set; }
         public string KeyUrl { get; set; }
         public byte[] CustomIv { get; set; }
+        public long ByteRangeOffset { get; set; }
+        public long ByteRangeLength { get; set; }
+
+        public HlsSegmentSpec()
+        {
+            ByteRangeOffset = -1;
+            ByteRangeLength = -1;
+        }
     }
 
     public static class HlsDownloader
     {
-        public static async Task ExecuteAsync(
+        public static Task ExecuteAsync(
             DownloadItem item,
             string defaultUserAgent,
             TokenBucketLimiter globalLimiter,
@@ -31,9 +40,22 @@ namespace MHSManager
             Action<DownloadItem> onProgress,
             CancellationToken token)
         {
+            AppSettings fallback = new AppSettings { DefaultUserAgent = defaultUserAgent };
+            return ExecuteAsync(item, fallback, globalLimiter, itemLimiter, onProgress, token);
+        }
+
+        public static async Task ExecuteAsync(
+            DownloadItem item,
+            AppSettings settings,
+            TokenBucketLimiter globalLimiter,
+            TokenBucketLimiter itemLimiter,
+            Action<DownloadItem> onProgress,
+            CancellationToken token)
+        {
+            string defaultUserAgent = settings != null ? settings.DefaultUserAgent : null;
             item.IsHlsStream = true;
             item.SupportsRanges = true;
-            item.FileName = HttpHelpers.EnsureNonM3u8VideoFileName(item.FileName);
+            item.FileName = HttpHelpers.EnsureHlsOutputFileName(item.FileName, false, item.HasExplicitFileName);
 
             if (!string.IsNullOrEmpty(item.SaveDirectory) && !Directory.Exists(item.SaveDirectory))
             {
@@ -45,7 +67,7 @@ namespace MHSManager
             if (onProgress != null) onProgress(item);
 
             string playlistUrl = item.Url;
-            string playlistText = await FetchStringAsync(playlistUrl, item, defaultUserAgent, token).ConfigureAwait(false);
+            string playlistText = await FetchStringAsync(playlistUrl, item, defaultUserAgent, settings, token).ConfigureAwait(false);
 
             if (string.IsNullOrWhiteSpace(playlistText) || !playlistText.Contains("#EXTM3U"))
             {
@@ -55,23 +77,32 @@ namespace MHSManager
             // Check if Master Playlist (#EXT-X-STREAM-INF)
             if (playlistText.IndexOf("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase) >= 0)
             {
-                string bestVariantUrl = SelectBestVariantUrl(playlistUrl, playlistText, item);
+                string bestVariantUrl = SelectBestVariantUrl(playlistUrl, playlistText);
                 if (string.IsNullOrEmpty(bestVariantUrl))
                 {
                     throw new InvalidOperationException("No playable variant stream found in HLS master playlist.");
                 }
                 playlistUrl = bestVariantUrl;
                 item.AddLog("Selected highest quality HLS variant: " + playlistUrl);
-                playlistText = await FetchStringAsync(playlistUrl, item, defaultUserAgent, token).ConfigureAwait(false);
+                playlistText = await FetchStringAsync(playlistUrl, item, defaultUserAgent, settings, token).ConfigureAwait(false);
             }
 
-            List<HlsSegmentSpec> specs = ParseMediaPlaylist(playlistUrl, playlistText);
+            bool isFmp4;
+            List<HlsSegmentSpec> specs = ParseMediaPlaylist(playlistUrl, playlistText, out isFmp4);
             if (specs.Count == 0)
             {
                 throw new InvalidOperationException("HLS media playlist contained zero media segments.");
             }
 
-            item.AddLog(string.Format("Parsed {0} HLS media segments.", specs.Count));
+            if (isFmp4 && !item.HasExplicitFileName)
+            {
+                item.FileName = HttpHelpers.EnsureHlsOutputFileName(item.FileName, true, false);
+            }
+
+            item.AddLog(string.Format(
+                "Parsed {0} HLS segments ({1}).",
+                specs.Count,
+                isFmp4 ? "fMP4 / CMAF" : "MPEG-TS"));
 
             string tempDir = item.PartFilePath + ".hls";
             if (!Directory.Exists(tempDir))
@@ -79,49 +110,47 @@ namespace MHSManager
                 Directory.CreateDirectory(tempDir);
             }
 
-            // Prepare visual segments for UI progress map
-            lock (item.Segments)
+            int completedSegments = 0;
+            long totalBytesDownloaded = 0;
+
+            lock (item.SyncRoot)
             {
                 item.Segments.Clear();
                 for (int i = 0; i < specs.Count; i++)
                 {
-                    item.Segments.Add(new SegmentInfo
+                    SegmentInfo uiSeg = new SegmentInfo
                     {
                         Id = i + 1,
                         StartByte = i * 1000L,
                         CurrentByte = i * 1000L,
                         EndByte = ((i + 1) * 1000L) - 1L,
                         State = "Pending"
-                    });
-                }
-            }
+                    };
 
-            Dictionary<string, byte[]> keyCache = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
-            object syncLock = new object();
-            int nextIndex = 0;
-            int completedSegments = 0;
-            long totalBytesDownloaded = 0;
-
-            // Check already downloaded segment files for instant crash/pause resume
-            for (int i = 0; i < specs.Count; i++)
-            {
-                string segFile = GetSegmentPartPath(tempDir, i);
-                if (File.Exists(segFile))
-                {
-                    FileInfo fi = new FileInfo(segFile);
-                    if (fi.Length > 0)
+                    string segFile = GetSegmentPartPath(tempDir, i);
+                    if (File.Exists(segFile))
                     {
-                        completedSegments++;
-                        totalBytesDownloaded += fi.Length;
-                        item.Segments[i].CurrentByte = item.Segments[i].EndByte + 1;
-                        item.Segments[i].State = "Completed";
+                        FileInfo fi = new FileInfo(segFile);
+                        if (fi.Length > 0)
+                        {
+                            completedSegments++;
+                            totalBytesDownloaded += fi.Length;
+                            uiSeg.CurrentByte = uiSeg.EndByte + 1;
+                            uiSeg.State = "Completed";
+                        }
                     }
+
+                    item.Segments.Add(uiSeg);
                 }
+                UpdateHlsTotals(item, completedSegments, specs.Count, totalBytesDownloaded);
             }
 
-            UpdateHlsTotals(item, completedSegments, specs.Count, totalBytesDownloaded);
             item.Status = DownloadStatus.Downloading;
             if (onProgress != null) onProgress(item);
+
+            Dictionary<string, byte[]> keyCache = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+            object keyLock = new object();
+            int nextIndex = 0;
 
             int workerCount = Math.Max(1, Math.Min(item.MaxConnections, Math.Min(16, specs.Count)));
             List<Task> workers = new List<Task>(workerCount);
@@ -138,7 +167,7 @@ namespace MHSManager
                         while (!token.IsCancellationRequested)
                         {
                             int myIdx = -1;
-                            lock (syncLock)
+                            lock (item.SyncRoot)
                             {
                                 while (nextIndex < specs.Count)
                                 {
@@ -161,15 +190,24 @@ namespace MHSManager
                             byte[] keyBytes = null;
                             if (!string.IsNullOrEmpty(spec.KeyUrl))
                             {
-                                lock (syncLock)
+                                lock (keyLock)
                                 {
                                     keyCache.TryGetValue(spec.KeyUrl, out keyBytes);
                                 }
                                 if (keyBytes == null)
                                 {
                                     byte[] fetchedKey = await DownloadBytesWithRetryAsync(
-                                        spec.KeyUrl, item, defaultUserAgent, globalLimiter, itemLimiter, null, token).ConfigureAwait(false);
-                                    lock (syncLock)
+                                        spec.KeyUrl,
+                                        -1,
+                                        -1,
+                                        item,
+                                        defaultUserAgent,
+                                        settings,
+                                        globalLimiter,
+                                        itemLimiter,
+                                        null,
+                                        token).ConfigureAwait(false);
+                                    lock (keyLock)
                                     {
                                         keyCache[spec.KeyUrl] = fetchedKey;
                                         keyBytes = fetchedKey;
@@ -178,16 +216,26 @@ namespace MHSManager
                             }
 
                             Stopwatch sw = Stopwatch.StartNew();
+                            int capturedIdx = myIdx;
                             byte[] rawPayload = await DownloadBytesWithRetryAsync(
                                 spec.Url,
+                                spec.ByteRangeOffset,
+                                spec.ByteRangeLength,
                                 item,
                                 defaultUserAgent,
+                                settings,
                                 globalLimiter,
                                 itemLimiter,
                                 delegate(int chunkLen)
                                 {
                                     double sec = Math.Max(0.001, sw.Elapsed.TotalSeconds);
-                                    item.Segments[myIdx].SpeedBytesPerSec = chunkLen / sec;
+                                    lock (item.SyncRoot)
+                                    {
+                                        if (capturedIdx < item.Segments.Count)
+                                        {
+                                            item.Segments[capturedIdx].SpeedBytesPerSec = chunkLen / sec;
+                                        }
+                                    }
                                 },
                                 token).ConfigureAwait(false);
 
@@ -205,7 +253,7 @@ namespace MHSManager
                             }
                             File.Move(segTmp, segPath);
 
-                            lock (syncLock)
+                            lock (item.SyncRoot)
                             {
                                 completedSegments++;
                                 totalBytesDownloaded += rawPayload.Length;
@@ -235,8 +283,9 @@ namespace MHSManager
             item.AddLog("Merging HLS segments into final media stream...");
             if (onProgress != null) onProgress(item);
 
+            string partPath = item.PartFilePath;
             long mergedBytes = 0;
-            using (FileStream outStream = new FileStream(item.PartFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 128))
+            using (FileStream outStream = new FileStream(partPath, FileMode.Create, FileAccess.Write, FileShare.None, 1024 * 128))
             {
                 byte[] copyBuf = new byte[1024 * 128];
                 for (int i = 0; i < specs.Count; i++)
@@ -260,7 +309,7 @@ namespace MHSManager
                 outStream.Flush(true);
             }
 
-            string sha256 = await HttpHelpers.ComputeSha256Async(item.PartFilePath, token).ConfigureAwait(false);
+            string sha256 = await HttpHelpers.ComputeSha256Async(partPath, token).ConfigureAwait(false);
             item.ComputedSha256 = sha256;
             if (!string.IsNullOrWhiteSpace(item.ExpectedSha256) &&
                 !string.Equals(item.ExpectedSha256.Trim(), sha256, StringComparison.OrdinalIgnoreCase))
@@ -271,12 +320,21 @@ namespace MHSManager
                     sha256));
             }
 
+            string oldMetaPath = item.MetaFilePath;
             string targetPath = item.FullTargetPath;
             if (File.Exists(targetPath))
             {
-                File.Delete(targetPath);
+                if (item.OverwriteExisting)
+                {
+                    File.Delete(targetPath);
+                }
+                else
+                {
+                    item.FileName = DownloadEngine.EnsureUniqueDiskFileName(item.SaveDirectory, item.FileName);
+                    targetPath = item.FullTargetPath;
+                }
             }
-            File.Move(item.PartFilePath, targetPath);
+            File.Move(partPath, targetPath);
 
             try
             {
@@ -284,9 +342,9 @@ namespace MHSManager
                 {
                     Directory.Delete(tempDir, true);
                 }
-                if (File.Exists(item.MetaFilePath))
+                if (File.Exists(oldMetaPath))
                 {
-                    File.Delete(item.MetaFilePath);
+                    File.Delete(oldMetaPath);
                 }
             }
             catch
@@ -296,6 +354,8 @@ namespace MHSManager
             item.TotalBytes = mergedBytes;
             item.DownloadedBytes = mergedBytes;
             item.CurrentSpeedBytesPerSec = 0;
+            item.RetryCount = 0;
+            item.NextRetryUtc = null;
             item.CompletedUtc = DateTime.UtcNow;
             item.Status = DownloadStatus.Completed;
             item.ErrorMessage = null;
@@ -328,7 +388,7 @@ namespace MHSManager
             return Path.Combine(tempDir, string.Format("seg_{0:D6}.part", index));
         }
 
-        private static string SelectBestVariantUrl(string masterUrl, string masterText, DownloadItem item)
+        private static string SelectBestVariantUrl(string masterUrl, string masterText)
         {
             Uri baseUri = new Uri(masterUrl);
             string[] lines = masterText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -347,7 +407,6 @@ namespace MHSManager
                         long.TryParse(bwMatch.Groups[1].Value, out bw);
                     }
 
-                    // Next non-comment line is the variant URI
                     for (int j = i + 1; j < lines.Length; j++)
                     {
                         string next = lines[j].Trim();
@@ -369,8 +428,45 @@ namespace MHSManager
             return bestUrl;
         }
 
-        private static List<HlsSegmentSpec> ParseMediaPlaylist(string mediaUrl, string mediaText)
+        private static bool TryParseByteRangeSpec(string spec, ref long lastEndExclusive, out long offset, out long length)
         {
+            offset = -1;
+            length = -1;
+            if (string.IsNullOrWhiteSpace(spec)) return false;
+
+            string trimmed = spec.Trim().Trim('"');
+            int atIdx = trimmed.IndexOf('@');
+            if (atIdx > 0)
+            {
+                long parsedLen;
+                long parsedOff;
+                if (long.TryParse(trimmed.Substring(0, atIdx).Trim(), out parsedLen) &&
+                    long.TryParse(trimmed.Substring(atIdx + 1).Trim(), out parsedOff) &&
+                    parsedLen > 0 && parsedOff >= 0)
+                {
+                    length = parsedLen;
+                    offset = parsedOff;
+                    lastEndExclusive = offset + length;
+                    return true;
+                }
+            }
+            else
+            {
+                long parsedLen;
+                if (long.TryParse(trimmed, out parsedLen) && parsedLen > 0)
+                {
+                    length = parsedLen;
+                    offset = lastEndExclusive >= 0 ? lastEndExclusive : 0;
+                    lastEndExclusive = offset + length;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static List<HlsSegmentSpec> ParseMediaPlaylist(string mediaUrl, string mediaText, out bool isFmp4)
+        {
+            isFmp4 = false;
             Uri baseUri = new Uri(mediaUrl);
             List<HlsSegmentSpec> list = new List<HlsSegmentSpec>();
             string[] lines = mediaText.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
@@ -378,6 +474,11 @@ namespace MHSManager
             long mediaSeq = 0;
             string currentKeyUrl = null;
             byte[] currentIv = null;
+            bool pendingInf = false;
+            long pendingByteRangeOffset = -1;
+            long pendingByteRangeLength = -1;
+            long lastMediaByteRangeEnd = 0;
+            long lastMapByteRangeEnd = 0;
 
             for (int i = 0; i < lines.Length; i++)
             {
@@ -391,6 +492,21 @@ namespace MHSManager
                     if (long.TryParse(seqStr, out parsedSeq))
                     {
                         mediaSeq = parsedSeq;
+                    }
+                }
+                else if (line.StartsWith("#EXTINF:", StringComparison.OrdinalIgnoreCase))
+                {
+                    pendingInf = true;
+                }
+                else if (line.StartsWith("#EXT-X-BYTERANGE:", StringComparison.OrdinalIgnoreCase))
+                {
+                    string brRaw = line.Substring("#EXT-X-BYTERANGE:".Length).Trim();
+                    long brOff;
+                    long brLen;
+                    if (TryParseByteRangeSpec(brRaw, ref lastMediaByteRangeEnd, out brOff, out brLen))
+                    {
+                        pendingByteRangeOffset = brOff;
+                        pendingByteRangeLength = brLen;
                     }
                 }
                 else if (line.StartsWith("#EXT-X-KEY:", StringComparison.OrdinalIgnoreCase))
@@ -435,31 +551,64 @@ namespace MHSManager
                 else if (line.StartsWith("#EXT-X-MAP:", StringComparison.OrdinalIgnoreCase))
                 {
                     Match mapMatch = Regex.Match(line, @"URI=""([^""]+)""", RegexOptions.IgnoreCase);
-                    if (mapMatch.Success && list.Count == 0)
+                    if (mapMatch.Success)
                     {
                         string mapUrl = new Uri(baseUri, mapMatch.Groups[1].Value).AbsoluteUri;
+                        if (!mapUrl.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+                        {
+                            isFmp4 = true;
+                        }
+
+                        long mapBrOff = -1;
+                        long mapBrLen = -1;
+                        Match mapBrMatch = Regex.Match(line, @"BYTERANGE=""([^""]+)""", RegexOptions.IgnoreCase);
+                        if (mapBrMatch.Success)
+                        {
+                            TryParseByteRangeSpec(mapBrMatch.Groups[1].Value, ref lastMapByteRangeEnd, out mapBrOff, out mapBrLen);
+                        }
+
                         list.Add(new HlsSegmentSpec
                         {
                             Index = list.Count,
                             Url = mapUrl,
+                            IsInitMap = true,
                             MediaSequence = mediaSeq,
-                            KeyUrl = null,
-                            CustomIv = null
+                            KeyUrl = currentKeyUrl,
+                            CustomIv = currentIv,
+                            ByteRangeOffset = mapBrOff,
+                            ByteRangeLength = mapBrLen
                         });
                     }
                 }
                 else if (!line.StartsWith("#"))
                 {
+                    if (!pendingInf)
+                    {
+                        continue;
+                    }
+
                     string segUrl = new Uri(baseUri, line).AbsoluteUri;
+                    if (segUrl.IndexOf(".m4s", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                        segUrl.IndexOf(".cmfv", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        isFmp4 = true;
+                    }
+
                     list.Add(new HlsSegmentSpec
                     {
                         Index = list.Count,
                         Url = segUrl,
+                        IsInitMap = false,
                         MediaSequence = mediaSeq,
                         KeyUrl = currentKeyUrl,
-                        CustomIv = currentIv
+                        CustomIv = currentIv,
+                        ByteRangeOffset = pendingByteRangeOffset,
+                        ByteRangeLength = pendingByteRangeLength
                     });
                     mediaSeq++;
+                    pendingInf = false;
+                    pendingByteRangeOffset = -1;
+                    pendingByteRangeLength = -1;
                 }
             }
 
@@ -507,7 +656,12 @@ namespace MHSManager
             }
         }
 
-        private static async Task<string> FetchStringAsync(string url, DownloadItem item, string defaultUserAgent, CancellationToken token)
+        private static async Task<string> FetchStringAsync(
+            string url,
+            DownloadItem item,
+            string defaultUserAgent,
+            AppSettings settings,
+            CancellationToken token)
         {
             HttpWebRequest req = HttpHelpers.CreateRequest(
                 url,
@@ -517,7 +671,8 @@ namespace MHSManager
                 item.AuthUser,
                 item.AuthPassword,
                 20000,
-                true);
+                true,
+                settings);
 
             using (token.Register(delegate { try { req.Abort(); } catch { } }))
             using (HttpWebResponse resp = (HttpWebResponse)await req.GetResponseAsync().ConfigureAwait(false))
@@ -530,8 +685,11 @@ namespace MHSManager
 
         private static async Task<byte[]> DownloadBytesWithRetryAsync(
             string url,
+            long byteRangeOffset,
+            long byteRangeLength,
             DownloadItem item,
             string defaultUserAgent,
+            AppSettings settings,
             TokenBucketLimiter globalLimiter,
             TokenBucketLimiter itemLimiter,
             Action<int> onChunk,
@@ -551,7 +709,13 @@ namespace MHSManager
                         item.AuthUser,
                         item.AuthPassword,
                         25000,
-                        false);
+                        false,
+                        settings);
+
+                    if (byteRangeOffset >= 0 && byteRangeLength > 0)
+                    {
+                        req.AddRange(byteRangeOffset, byteRangeOffset + byteRangeLength - 1);
+                    }
 
                     using (token.Register(delegate { try { req.Abort(); } catch { } }))
                     using (HttpWebResponse resp = (HttpWebResponse)await req.GetResponseAsync().ConfigureAwait(false))

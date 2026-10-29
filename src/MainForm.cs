@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 namespace MHSManager
@@ -20,17 +21,18 @@ namespace MHSManager
 
         private readonly DownloadManagerController _controller;
         private readonly BrowserBridgeServer _bridge;
+        private readonly StartupLaunchOptions _launch;
         private readonly Dictionary<string, DownloadProgressDialog> _openDialogs;
         private readonly System.Windows.Forms.Timer _uiTimer;
-        private readonly string _startupAddUrl;
-        private readonly string _startupReferer;
-        private readonly string _startupCookies;
-        private readonly int _autoExitMs;
 
+        private MenuStrip _menuBar;
+        private Panel _leftNavPanel;
+        private Panel _inspectorPanel;
         private TreeView _treeNav;
         private BufferedListView _lvDownloads;
         private TextBox _txtSearch;
         private Button _btnSpeedToggle;
+        private Button _btnDropTarget;
         private SegmentVisualizerBar _inspectorSegBar;
         private SpeedGraphControl _inspectorSpeedGraph;
         private TextBox _txtInspectorLog;
@@ -39,11 +41,17 @@ namespace MHSManager
         private Label _lblStatusSpeed;
         private Label _lblStatusBridge;
         private NotifyIcon _trayIcon;
+        private DropTargetForm _dropTargetForm;
+        private ToolStripMenuItem _miShowDropTargetTasks;
+        private ToolStripMenuItem _miShowDropTargetView;
 
         private string _activeFilterKey = "ALL";
+        private int _sortColumnIndex = -1;
+        private bool _sortAscending = true;
         private string _lastClipboardSeen = "";
         private bool _clipboardDialogOpen;
         private bool _clipboardRegistered;
+        private bool _hadWorkSinceLaunch;
         private bool _forceExit;
 
         public MainForm(
@@ -53,20 +61,32 @@ namespace MHSManager
             string startupReferer,
             string startupCookies,
             int autoExitMs)
+            : this(controller, bridge, new StartupLaunchOptions
+            {
+                AddUrl = startupAddUrl,
+                Referer = startupReferer,
+                Cookies = startupCookies,
+                AutoExitMs = autoExitMs
+            })
+        {
+        }
+
+        public MainForm(
+            DownloadManagerController controller,
+            BrowserBridgeServer bridge,
+            StartupLaunchOptions launch)
         {
             _controller = controller;
             _bridge = bridge;
-            _startupAddUrl = startupAddUrl;
-            _startupReferer = startupReferer;
-            _startupCookies = startupCookies;
-            _autoExitMs = autoExitMs;
+            _launch = launch ?? new StartupLaunchOptions();
             _openDialogs = new Dictionary<string, DownloadProgressDialog>(StringComparer.OrdinalIgnoreCase);
 
-            Text = "MHS Manager — Open-Source Multi-Connection Download Accelerator";
-            Size = new Size(1180, 720);
-            MinimumSize = new Size(960, 580);
+            Text = "MHS Manager — Multi-Connection Download Accelerator";
+            Size = new Size(1260, 740);
+            MinimumSize = new Size(980, 580);
             StartPosition = FormStartPosition.CenterScreen;
             AllowDrop = true;
+            KeyPreview = true;
             MhsTheme.StyleForm(this);
 
             TryLoadExecutableIcon();
@@ -75,9 +95,12 @@ namespace MHSManager
 
             _controller.DownloadStarted += OnControllerDownloadStarted;
             _controller.DownloadCompleted += OnControllerDownloadCompleted;
+            _controller.QueuePostActionTriggered += OnQueuePostActionTriggered;
+
             if (_bridge != null)
             {
                 _bridge.RequestShowAddDialog += OnBridgeRequestShowAddDialog;
+                _bridge.RequestShowBatchDialog += OnBridgeRequestShowBatchDialog;
             }
 
             DragEnter += OnFormDragEnter;
@@ -89,6 +112,14 @@ namespace MHSManager
             _uiTimer.Start();
 
             Shown += OnMainFormShown;
+        }
+
+        private bool IsAutomatedSilentSession
+        {
+            get
+            {
+                return _launch.AutoExitMs > 0 || _launch.ExitOnComplete || _launch.SilentMode;
+            }
         }
 
         private void TryLoadExecutableIcon()
@@ -138,46 +169,95 @@ namespace MHSManager
             base.WndProc(ref m);
         }
 
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.Control && e.KeyCode == Keys.N)
+            {
+                e.Handled = true;
+                PromptAddDownload(null, null, null);
+            }
+            else if (e.Control && e.KeyCode == Keys.F)
+            {
+                e.Handled = true;
+                _txtSearch.Focus();
+                _txtSearch.SelectAll();
+            }
+            else if (e.Control && e.KeyCode == Keys.G)
+            {
+                e.Handled = true;
+                OpenGrabberDialog();
+            }
+            else if (e.Alt && e.KeyCode == Keys.Enter)
+            {
+                e.Handled = true;
+                OpenSelectedProperties();
+            }
+            else if (e.KeyCode == Keys.Delete && !_txtSearch.Focused)
+            {
+                e.Handled = true;
+                DeleteSelected(e.Shift);
+            }
+        }
+
         private void BuildLayout()
         {
+            // Classic IDM Menu Bar
+            _menuBar = BuildMainMenuStrip();
+
             // Top Toolbar
             Panel topToolbar = new Panel();
             topToolbar.Dock = DockStyle.Top;
-            topToolbar.Height = 52;
+            topToolbar.Height = 50;
             topToolbar.BackColor = MhsTheme.BgSurface;
-            topToolbar.Padding = new Padding(10, 9, 10, 9);
+            topToolbar.Padding = new Padding(8, 9, 8, 9);
+
+            Panel searchPanel = new Panel();
+            searchPanel.Dock = DockStyle.Right;
+            searchPanel.Width = 205;
+            _txtSearch = MhsTheme.CreateTextBox(false);
+            _txtSearch.SetBounds(4, 4, 196, 25);
+            _txtSearch.TextChanged += delegate { RefreshDownloadList(); };
+            ToolTip searchTip = new ToolTip();
+            searchTip.SetToolTip(_txtSearch, "Search downloads by file name or URL (Ctrl+F)");
+            searchPanel.Controls.Add(_txtSearch);
 
             FlowLayoutPanel flowBtns = new FlowLayoutPanel();
-            flowBtns.Dock = DockStyle.Left;
-            flowBtns.Width = 900;
+            flowBtns.Dock = DockStyle.Fill;
             flowBtns.WrapContents = false;
             flowBtns.BackColor = Color.Transparent;
 
-            Button btnAdd = MhsTheme.CreateToolbarButton("+ Add URL", MhsTheme.AccentEmerald, 96);
+            Button btnAdd = MhsTheme.CreateToolbarButton("+ Add URL", MhsTheme.AccentEmerald, 82);
             btnAdd.Click += delegate { PromptAddDownload(null, null, null); };
 
-            Button btnResume = MhsTheme.CreateToolbarButton("▶ Resume", MhsTheme.AccentSky, 88);
+            Button btnResume = MhsTheme.CreateToolbarButton("▶ Resume", MhsTheme.AccentSky, 76);
             btnResume.Click += delegate { ResumeSelected(); };
 
-            Button btnPause = MhsTheme.CreateToolbarButton("⏸ Pause", MhsTheme.BgElevated, 82);
+            Button btnPause = MhsTheme.CreateToolbarButton("⏸ Stop", MhsTheme.BgElevated, 68);
             btnPause.Click += delegate { PauseSelected(); };
 
-            Button btnStopAll = MhsTheme.CreateToolbarButton("⏹ Stop All", MhsTheme.BgElevated, 88);
+            Button btnStopAll = MhsTheme.CreateToolbarButton("⏹ Stop All", MhsTheme.BgElevated, 78);
             btnStopAll.Click += delegate { _controller.PauseAll(); RefreshDownloadList(); };
 
-            Button btnClearDone = MhsTheme.CreateToolbarButton("✓ Clear Done", MhsTheme.BgElevated, 98);
+            Button btnClearDone = MhsTheme.CreateToolbarButton("✓ Clear Done", MhsTheme.BgElevated, 88);
             btnClearDone.Click += delegate { _controller.ClearCompleted(); RefreshDownloadList(); };
 
-            Button btnBatch = MhsTheme.CreateToolbarButton("🔢 Batch", MhsTheme.BgElevated, 78);
+            Button btnStartQ = MhsTheme.CreateToolbarButton("▶ Start Q", MhsTheme.BgElevated, 76);
+            btnStartQ.Click += delegate { _controller.StartQueue("Main Queue"); RefreshDownloadList(); };
+
+            Button btnStopQ = MhsTheme.CreateToolbarButton("⏹ Stop Q", MhsTheme.BgElevated, 74);
+            btnStopQ.Click += delegate { _controller.StopQueue("Main Queue"); RefreshDownloadList(); };
+
+            Button btnBatch = MhsTheme.CreateToolbarButton("🔢 Batch", MhsTheme.BgElevated, 70);
             btnBatch.Click += delegate { OpenBatchDialog(); };
 
-            Button btnGrabber = MhsTheme.CreateToolbarButton("🕷 Grabber", MhsTheme.BgElevated, 88);
+            Button btnGrabber = MhsTheme.CreateToolbarButton("🕷 Grabber", MhsTheme.BgElevated, 78);
             btnGrabber.Click += delegate { OpenGrabberDialog(); };
 
-            Button btnScheduler = MhsTheme.CreateToolbarButton("⏰ Scheduler", MhsTheme.BgElevated, 96);
+            Button btnScheduler = MhsTheme.CreateToolbarButton("⏰ Scheduler", MhsTheme.BgElevated, 86);
             btnScheduler.Click += delegate { OpenSettingsDialog(1); };
 
-            _btnSpeedToggle = MhsTheme.CreateToolbarButton("⚡ Speed Cap", MhsTheme.BgElevated, 98);
+            _btnSpeedToggle = MhsTheme.CreateToolbarButton("⚡ Speed Cap", MhsTheme.BgElevated, 88);
             _btnSpeedToggle.Click += delegate
             {
                 _controller.Settings.EnableGlobalSpeedLimit = !_controller.Settings.EnableGlobalSpeedLimit;
@@ -185,28 +265,22 @@ namespace MHSManager
                 UpdateSpeedButtonVisual();
             };
 
-            Button btnOptions = MhsTheme.CreateToolbarButton("⚙ Options", MhsTheme.BgElevated, 86);
+            _btnDropTarget = MhsTheme.CreateToolbarButton("🎯 Drop Box", MhsTheme.BgElevated, 82);
+            _btnDropTarget.Click += delegate { ToggleDropTarget(); };
+
+            Button btnOptions = MhsTheme.CreateToolbarButton("⚙ Options", MhsTheme.BgElevated, 76);
             btnOptions.Click += delegate { OpenSettingsDialog(0); };
 
             flowBtns.Controls.AddRange(new Control[]
             {
                 btnAdd, btnResume, btnPause, btnStopAll, btnClearDone,
-                btnBatch, btnGrabber, btnScheduler, _btnSpeedToggle, btnOptions
+                btnStartQ, btnStopQ, btnBatch, btnGrabber, btnScheduler,
+                _btnSpeedToggle, _btnDropTarget, btnOptions
             });
             UpdateSpeedButtonVisual();
 
-            Panel searchPanel = new Panel();
-            searchPanel.Dock = DockStyle.Right;
-            searchPanel.Width = 220;
-            _txtSearch = MhsTheme.CreateTextBox(false);
-            _txtSearch.SetBounds(8, 5, 204, 25);
-            _txtSearch.TextChanged += delegate { RefreshDownloadList(); };
-            Label lblSearchHint = MhsTheme.CreateLabel("Filter:", true);
-            lblSearchHint.Location = new Point(-36, 8);
-            searchPanel.Controls.Add(_txtSearch);
-
-            topToolbar.Controls.Add(searchPanel);
             topToolbar.Controls.Add(flowBtns);
+            topToolbar.Controls.Add(searchPanel);
 
             // Bottom Status Bar
             Panel statusBar = new Panel();
@@ -229,11 +303,11 @@ namespace MHSManager
             statusBar.Controls.Add(_lblStatusBridge);
 
             // Bottom Live Segment & Speed Inspector
-            Panel inspectorPanel = new Panel();
-            inspectorPanel.Dock = DockStyle.Bottom;
-            inspectorPanel.Height = 185;
-            inspectorPanel.BackColor = MhsTheme.BgSurface;
-            inspectorPanel.Padding = new Padding(12, 8, 12, 8);
+            _inspectorPanel = new Panel();
+            _inspectorPanel.Dock = DockStyle.Bottom;
+            _inspectorPanel.Height = 180;
+            _inspectorPanel.BackColor = MhsTheme.BgSurface;
+            _inspectorPanel.Padding = new Padding(12, 8, 12, 8);
 
             _lblInspectorTitle = MhsTheme.CreateLabel("Live Multi-Segment & Throughput Inspector (Select a download above)", false);
             _lblInspectorTitle.Font = MhsTheme.FontBold;
@@ -267,16 +341,16 @@ namespace MHSManager
             bottomSplit.Controls.Add(logPad);
             bottomSplit.Controls.Add(_inspectorSpeedGraph);
 
-            inspectorPanel.Controls.Add(bottomSplit);
-            inspectorPanel.Controls.Add(_inspectorSegBar);
-            inspectorPanel.Controls.Add(_lblInspectorTitle);
+            _inspectorPanel.Controls.Add(bottomSplit);
+            _inspectorPanel.Controls.Add(_inspectorSegBar);
+            _inspectorPanel.Controls.Add(_lblInspectorTitle);
 
             // Left Category & Queue Tree
-            Panel leftNavPanel = new Panel();
-            leftNavPanel.Dock = DockStyle.Left;
-            leftNavPanel.Width = 205;
-            leftNavPanel.Padding = new Padding(8, 8, 4, 8);
-            leftNavPanel.BackColor = MhsTheme.BgDark;
+            _leftNavPanel = new Panel();
+            _leftNavPanel.Dock = DockStyle.Left;
+            _leftNavPanel.Width = 205;
+            _leftNavPanel.Padding = new Padding(8, 8, 4, 8);
+            _leftNavPanel.BackColor = MhsTheme.BgDark;
 
             _treeNav = new TreeView();
             _treeNav.Dock = DockStyle.Fill;
@@ -296,7 +370,7 @@ namespace MHSManager
                     RefreshDownloadList();
                 }
             };
-            leftNavPanel.Controls.Add(_treeNav);
+            _leftNavPanel.Controls.Add(_treeNav);
 
             // Center Downloads Table
             Panel centerPanel = new Panel();
@@ -311,29 +385,180 @@ namespace MHSManager
             _lvDownloads.BackColor = MhsTheme.BgSurface;
             _lvDownloads.ForeColor = MhsTheme.TextPrimary;
             _lvDownloads.BorderStyle = BorderStyle.FixedSingle;
-            _lvDownloads.Columns.Add("File Name", 265);
-            _lvDownloads.Columns.Add("Size", 95);
-            _lvDownloads.Columns.Add("Status / Progress", 145);
-            _lvDownloads.Columns.Add("Speed", 105);
-            _lvDownloads.Columns.Add("ETA", 85);
-            _lvDownloads.Columns.Add("Threads", 75);
-            _lvDownloads.Columns.Add("Category", 95);
-            _lvDownloads.Columns.Add("Queue", 95);
-            _lvDownloads.Columns.Add("Added", 125);
+            _lvDownloads.Columns.Add("File Name", 245);
+            _lvDownloads.Columns.Add("Size", 90);
+            _lvDownloads.Columns.Add("Status", 138);
+            _lvDownloads.Columns.Add("Transfer Rate", 100);
+            _lvDownloads.Columns.Add("Time Left", 80);
+            _lvDownloads.Columns.Add("Resume", 64);
+            _lvDownloads.Columns.Add("Threads", 66);
+            _lvDownloads.Columns.Add("Category", 88);
+            _lvDownloads.Columns.Add("Queue", 105);
+            _lvDownloads.Columns.Add("Last Try / Added", 130);
             _lvDownloads.ContextMenuStrip = BuildContextMenu();
             _lvDownloads.SelectedIndexChanged += delegate { UpdateInspectorFromSelection(false); };
             _lvDownloads.DoubleClick += OnListDoubleClicked;
+            _lvDownloads.ColumnClick += OnColumnClicked;
+            _lvDownloads.ItemDrag += OnDownloadItemDrag;
             centerPanel.Controls.Add(_lvDownloads);
 
+            MainMenuStrip = _menuBar;
             Controls.Add(centerPanel);
-            Controls.Add(leftNavPanel);
-            Controls.Add(inspectorPanel);
+            Controls.Add(_leftNavPanel);
+            Controls.Add(_inspectorPanel);
             Controls.Add(statusBar);
             Controls.Add(topToolbar);
+            Controls.Add(_menuBar);
+        }
+
+        private MenuStrip BuildMainMenuStrip()
+        {
+            MenuStrip ms = new MenuStrip();
+            ms.BackColor = MhsTheme.BgDark;
+            ms.ForeColor = MhsTheme.TextPrimary;
+            ms.Renderer = MhsTheme.CreateDarkMenuRenderer();
+
+            // Tasks Menu
+            ToolStripMenuItem mTasks = new ToolStripMenuItem("&Tasks");
+            mTasks.DropDownItems.Add("Add New Download...\tCtrl+N", null, delegate { PromptAddDownload(null, null, null); });
+            mTasks.DropDownItems.Add("Add Batch Download (Wildcard)...", null, delegate { OpenBatchDialog(); });
+            mTasks.DropDownItems.Add("Add Batch from Clipboard...", null, delegate { ImportBatchFromClipboard(); });
+            mTasks.DropDownItems.Add("Run Site Grabber...\tCtrl+G", null, delegate { OpenGrabberDialog(); });
+            mTasks.DropDownItems.Add(new ToolStripSeparator());
+
+            _miShowDropTargetTasks = new ToolStripMenuItem("Show Drop Target");
+            _miShowDropTargetTasks.Checked = _controller.Settings.ShowDropTarget;
+            _miShowDropTargetTasks.Click += delegate { ToggleDropTarget(); };
+            mTasks.DropDownItems.Add(_miShowDropTargetTasks);
+            mTasks.DropDownItems.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem mImport = new ToolStripMenuItem("Import");
+            mImport.DropDownItems.Add("From IDM Export File (.ef2)...", null, delegate { ImportDownloadsFromFile(true); });
+            mImport.DropDownItems.Add("From Text File (.txt)...", null, delegate { ImportDownloadsFromFile(false); });
+            mTasks.DropDownItems.Add(mImport);
+
+            ToolStripMenuItem mExport = new ToolStripMenuItem("Export");
+            mExport.DropDownItems.Add("To IDM Export File (.ef2)...", null, delegate { ExportDownloadsToFile(true); });
+            mExport.DropDownItems.Add("To Text File (.txt)...", null, delegate { ExportDownloadsToFile(false); });
+            mTasks.DropDownItems.Add(mExport);
+
+            mTasks.DropDownItems.Add(new ToolStripSeparator());
+            mTasks.DropDownItems.Add("Exit", null, delegate { _forceExit = true; Close(); });
+
+            // File Menu
+            ToolStripMenuItem mFile = new ToolStripMenuItem("&File");
+            mFile.DropDownItems.Add("Resume / Download Now", null, delegate { ResumeSelected(); });
+            mFile.DropDownItems.Add("Stop / Pause Download", null, delegate { PauseSelected(); });
+            mFile.DropDownItems.Add("Redownload from Beginning", null, delegate { RedownloadSelected(); });
+            mFile.DropDownItems.Add("Refresh Download Address...", null, delegate { RefreshSelectedAddress(); });
+            mFile.DropDownItems.Add(new ToolStripSeparator());
+            mFile.DropDownItems.Add("Open", null, delegate { OpenSelectedFile(false); });
+            mFile.DropDownItems.Add("Open With...", null, delegate { OpenSelectedFileWith(); });
+            mFile.DropDownItems.Add("Open Folder", null, delegate { OpenSelectedFile(true); });
+            mFile.DropDownItems.Add(new ToolStripSeparator());
+            mFile.DropDownItems.Add("Remove\tDel", null, delegate { DeleteSelected(false); });
+            mFile.DropDownItems.Add("Remove & Delete File\tShift+Del", null, delegate { DeleteSelected(true); });
+            mFile.DropDownItems.Add(new ToolStripSeparator());
+            mFile.DropDownItems.Add("Properties...\tAlt+Enter", null, delegate { OpenSelectedProperties(); });
+
+            // Downloads Menu
+            ToolStripMenuItem mDownloads = new ToolStripMenuItem("&Downloads");
+            mDownloads.DropDownItems.Add("Resume All Unfinished", null, delegate { _controller.ResumeAllUnfinished(); RefreshDownloadList(); });
+            mDownloads.DropDownItems.Add("Pause / Stop All", null, delegate { _controller.PauseAll(); RefreshDownloadList(); });
+            mDownloads.DropDownItems.Add("Delete All Completed", null, delegate { _controller.ClearCompleted(); RefreshDownloadList(); });
+            mDownloads.DropDownItems.Add(new ToolStripSeparator());
+            mDownloads.DropDownItems.Add("Start Main Queue", null, delegate { _controller.StartQueue("Main Queue"); RefreshDownloadList(); });
+            mDownloads.DropDownItems.Add("Stop Main Queue", null, delegate { _controller.StopQueue("Main Queue"); RefreshDownloadList(); });
+            mDownloads.DropDownItems.Add("Scheduler & Queues...", null, delegate { OpenSettingsDialog(1); });
+            mDownloads.DropDownItems.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem mSpeed = new ToolStripMenuItem("Speed Limiter");
+            mSpeed.DropDownItems.Add("Turn On / Off", null, delegate
+            {
+                _controller.Settings.EnableGlobalSpeedLimit = !_controller.Settings.EnableGlobalSpeedLimit;
+                _controller.ApplySettingsChanged();
+                UpdateSpeedButtonVisual();
+            });
+            mSpeed.DropDownItems.Add("Speed Limiter Settings...", null, delegate { OpenSettingsDialog(0); });
+            mDownloads.DropDownItems.Add(mSpeed);
+
+            mDownloads.DropDownItems.Add("Find...\tCtrl+F", null, delegate { _txtSearch.Focus(); _txtSearch.SelectAll(); });
+            mDownloads.DropDownItems.Add(new ToolStripSeparator());
+            mDownloads.DropDownItems.Add("Options...", null, delegate { OpenSettingsDialog(0); });
+
+            // View Menu
+            ToolStripMenuItem mView = new ToolStripMenuItem("&View");
+            ToolStripMenuItem miToggleTree = new ToolStripMenuItem("Show Categories & Queues") { Checked = true };
+            miToggleTree.Click += delegate
+            {
+                miToggleTree.Checked = !miToggleTree.Checked;
+                _leftNavPanel.Visible = miToggleTree.Checked;
+            };
+            mView.DropDownItems.Add(miToggleTree);
+
+            ToolStripMenuItem miToggleInsp = new ToolStripMenuItem("Show Live Segment Inspector") { Checked = true };
+            miToggleInsp.Click += delegate
+            {
+                miToggleInsp.Checked = !miToggleInsp.Checked;
+                _inspectorPanel.Visible = miToggleInsp.Checked;
+            };
+            mView.DropDownItems.Add(miToggleInsp);
+
+            _miShowDropTargetView = new ToolStripMenuItem("Show Drop Target") { Checked = _controller.Settings.ShowDropTarget };
+            _miShowDropTargetView.Click += delegate { ToggleDropTarget(); };
+            mView.DropDownItems.Add(_miShowDropTargetView);
+
+            // Help Menu
+            ToolStripMenuItem mHelp = new ToolStripMenuItem("&Help");
+            mHelp.DropDownItems.Add("Browser Extension & Native Host Setup...", null, delegate { OpenSettingsDialog(4); });
+            mHelp.DropDownItems.Add("Command-Line Switches (IDM Compatible)...", null, delegate { ShowCliReference(); });
+            mHelp.DropDownItems.Add(new ToolStripSeparator());
+            mHelp.DropDownItems.Add("About MHS Manager...", null, delegate
+            {
+                MessageBox.Show(
+                    this,
+                    "MHS Manager v1.1.0\r\n\r\n" +
+                    "Clean-room Multi-Connection Download Accelerator & HLS Stream Merger.\r\n" +
+                    "• Dynamic HTTP/1.1 & HTTPS Byte-Range Work Stealing (up to 32 connections)\r\n" +
+                    "• ETag / Last-Modified Safe Resume Validation & Refresh Download Address\r\n" +
+                    "• HLS (.m3u8) MPEG-TS & fMP4 (#EXT-X-MAP / #EXT-X-BYTERANGE / AES-128) Merger\r\n" +
+                    "• Authenticated Browser Extension + Native Messaging Host (com.mhsmanager.host)\r\n" +
+                    "• IDM-Compatible CLI Switches (/d /p /f /n /a /q /h /s) & .ef2 Import/Export",
+                    "About MHS Manager",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            });
+
+            ms.Items.AddRange(new ToolStripItem[] { mTasks, mFile, mDownloads, mView, mHelp });
+            return ms;
+        }
+
+        private void ShowCliReference()
+        {
+            MessageBox.Show(
+                this,
+                "IDM-Compatible Command-Line Switches:\r\n\r\n" +
+                "MHSManager.exe /d <URL> [/p <local_path>] [/f <local_filename>] [/n] [/a] [/q] [/h]\r\n" +
+                "MHSManager.exe /s\r\n\r\n" +
+                "  /d <URL>    Download specified file\r\n" +
+                "  /p <path>   Define local folder to save file\r\n" +
+                "  /f <name>   Define local file name\r\n" +
+                "  /n          Silent mode (start immediately without confirmation dialog)\r\n" +
+                "  /a          Add file to download queue without starting immediately\r\n" +
+                "  /q          Exit MHS Manager after download completes\r\n" +
+                "  /h          Stop queue processing after active downloads finish\r\n" +
+                "  /s          Start Main Queue immediately",
+                "Command-Line Reference — MHS Manager",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
         }
 
         private void PopulateNavigationTree()
         {
+            string prevTag = _treeNav.SelectedNode != null && _treeNav.SelectedNode.Tag != null
+                ? _treeNav.SelectedNode.Tag.ToString()
+                : "ALL";
+
             _treeNav.Nodes.Clear();
 
             TreeNode nAll = new TreeNode("All Downloads") { Tag = "ALL" };
@@ -360,26 +585,58 @@ namespace MHSManager
             _treeNav.Nodes.Add(nUnfinished);
             _treeNav.Nodes.Add(nFinished);
             _treeNav.Nodes.Add(nQueues);
-            _treeNav.SelectedNode = nAll;
+            _treeNav.SelectedNode = FindTreeNodeByTag(_treeNav.Nodes, prevTag) ?? nAll;
+        }
+
+        private static TreeNode FindTreeNodeByTag(TreeNodeCollection nodes, string tag)
+        {
+            for (int i = 0; i < nodes.Count; i++)
+            {
+                if (nodes[i].Tag != null && string.Equals(nodes[i].Tag.ToString(), tag, StringComparison.OrdinalIgnoreCase))
+                {
+                    return nodes[i];
+                }
+                TreeNode child = FindTreeNodeByTag(nodes[i].Nodes, tag);
+                if (child != null) return child;
+            }
+            return null;
         }
 
         private ContextMenuStrip BuildContextMenu()
         {
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.BackColor = MhsTheme.BgElevated;
-            menu.ForeColor = MhsTheme.TextPrimary;
+            menu.Renderer = MhsTheme.CreateDarkMenuRenderer();
 
-            menu.Items.Add("Open Floating Progress Window", null, delegate { OpenSelectedProgressWindow(); });
-            menu.Items.Add("Resume / Retry Download", null, delegate { ResumeSelected(); });
-            menu.Items.Add("Pause Download", null, delegate { PauseSelected(); });
+            menu.Items.Add("Open", null, delegate { OpenSelectedFile(false); });
+            menu.Items.Add("Open With...", null, delegate { OpenSelectedFileWith(); });
+            menu.Items.Add("Open Folder", null, delegate { OpenSelectedFile(true); });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Open Downloaded File", null, delegate { OpenSelectedFile(false); });
-            menu.Items.Add("Open Containing Folder", null, delegate { OpenSelectedFile(true); });
+            menu.Items.Add("Open Floating Progress Window", null, delegate { OpenSelectedProgressWindow(); });
+            menu.Items.Add("Resume / Download Now", null, delegate { ResumeSelected(); });
+            menu.Items.Add("Stop / Pause Download", null, delegate { PauseSelected(); });
+            menu.Items.Add("Redownload from Beginning", null, delegate { RedownloadSelected(); });
+            menu.Items.Add("Refresh Download Address...", null, delegate { RefreshSelectedAddress(); });
+            menu.Items.Add(new ToolStripSeparator());
+
+            ToolStripMenuItem mMoveQueue = new ToolStripMenuItem("Move to Queue");
+            menu.Opening += delegate
+            {
+                mMoveQueue.DropDownItems.Clear();
+                for (int i = 0; i < _controller.Settings.Queues.Count; i++)
+                {
+                    string qName = _controller.Settings.Queues[i].Name;
+                    mMoveQueue.DropDownItems.Add(qName, null, delegate { MoveSelectedToQueue(qName); });
+                }
+            };
+            menu.Items.Add(mMoveQueue);
+
             menu.Items.Add("Verify MD5 / SHA-256 Checksum...", null, delegate { VerifySelectedChecksum(); });
             menu.Items.Add("Copy Download URL", null, delegate { CopySelectedUrl(); });
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("Remove from List", null, delegate { DeleteSelected(false); });
-            menu.Items.Add("Remove & Delete File from Disk", null, delegate { DeleteSelected(true); });
+            menu.Items.Add("Remove\tDel", null, delegate { DeleteSelected(false); });
+            menu.Items.Add("Remove & Delete File from Disk\tShift+Del", null, delegate { DeleteSelected(true); });
+            menu.Items.Add(new ToolStripSeparator());
+            menu.Items.Add("Properties...\tAlt+Enter", null, delegate { OpenSelectedProperties(); });
             return menu;
         }
 
@@ -392,9 +649,13 @@ namespace MHSManager
             _trayIcon.DoubleClick += delegate { RestoreFromTray(); };
 
             ContextMenuStrip trayMenu = new ContextMenuStrip();
+            trayMenu.Renderer = MhsTheme.CreateDarkMenuRenderer();
             trayMenu.Items.Add("Open MHS Manager", null, delegate { RestoreFromTray(); });
-            trayMenu.Items.Add("Add New URL...", null, delegate { RestoreFromTray(); PromptAddDownload(null, null, null); });
-            trayMenu.Items.Add("Pause All Downloads", null, delegate { _controller.PauseAll(); });
+            trayMenu.Items.Add("Add New Download...", null, delegate { RestoreFromTray(); PromptAddDownload(null, null, null); });
+            trayMenu.Items.Add("Show / Hide Drop Target", null, delegate { ToggleDropTarget(); });
+            trayMenu.Items.Add(new ToolStripSeparator());
+            trayMenu.Items.Add("Start Main Queue", null, delegate { _controller.StartQueue("Main Queue"); });
+            trayMenu.Items.Add("Stop All Downloads", null, delegate { _controller.PauseAll(); });
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("Exit MHS Manager", null, delegate { _forceExit = true; Close(); });
             _trayIcon.ContextMenuStrip = trayMenu;
@@ -410,19 +671,106 @@ namespace MHSManager
             Activate();
         }
 
+        private void ToggleDropTarget()
+        {
+            SetDropTargetVisible(!_controller.Settings.ShowDropTarget);
+        }
+
+        private void SetDropTargetVisible(bool show)
+        {
+            _controller.Settings.ShowDropTarget = show;
+            _controller.SaveStateSafe();
+
+            if (_miShowDropTargetTasks != null) _miShowDropTargetTasks.Checked = show;
+            if (_miShowDropTargetView != null) _miShowDropTargetView.Checked = show;
+            _btnDropTarget.BackColor = show ? MhsTheme.AccentSky : MhsTheme.BgElevated;
+
+            if (show)
+            {
+                if (_dropTargetForm == null || _dropTargetForm.IsDisposed)
+                {
+                    _dropTargetForm = new DropTargetForm(
+                        _controller,
+                        delegate(string url)
+                        {
+                            RestoreFromTray();
+                            PromptAddDownload(url, null, null);
+                        },
+                        delegate { RestoreFromTray(); },
+                        delegate { SetDropTargetVisible(false); });
+                }
+                _dropTargetForm.Show();
+            }
+            else if (_dropTargetForm != null && !_dropTargetForm.IsDisposed)
+            {
+                _dropTargetForm.Close();
+                _dropTargetForm = null;
+            }
+        }
+
         private void OnMainFormShown(object sender, EventArgs e)
         {
             RefreshDownloadList();
 
-            if (!string.IsNullOrWhiteSpace(_startupAddUrl))
+            if (_controller.Settings.ShowDropTarget && !IsAutomatedSilentSession)
             {
-                PromptAddDownload(_startupAddUrl, _startupReferer, _startupCookies);
+                SetDropTargetVisible(true);
             }
 
-            if (_autoExitMs > 0)
+            if (_launch.StartQueueNow)
+            {
+                _controller.StartQueue("Main Queue");
+                _hadWorkSinceLaunch = true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(_launch.AddUrl))
+            {
+                if (_launch.SilentMode || _launch.HoldInQueue)
+                {
+                    bool hasExplicitName = !string.IsNullOrWhiteSpace(_launch.ExplicitFileName);
+                    string fn = hasExplicitName
+                        ? _launch.ExplicitFileName
+                        : CategoryClassifier.GuessFileNameFromUrl(_launch.AddUrl);
+                    string cat = CategoryClassifier.ClassifyByFileName(fn);
+                    string dir = !string.IsNullOrWhiteSpace(_launch.SaveDirectory)
+                        ? Path.GetFullPath(_launch.SaveDirectory)
+                        : CategoryClassifier.ResolveSaveDirectory(_controller.Settings, cat);
+
+                    DownloadItem cliItem = new DownloadItem
+                    {
+                        Url = _launch.AddUrl.Trim(),
+                        FileName = fn,
+                        HasExplicitFileName = hasExplicitName,
+                        OverwriteExisting = hasExplicitName,
+                        CategoryName = cat,
+                        SaveDirectory = dir,
+                        Referer = _launch.Referer,
+                        Cookies = _launch.Cookies,
+                        MaxConnections = _controller.Settings.DefaultConnectionsPerDownload
+                    };
+
+                    bool startNow = !_launch.HoldInQueue;
+                    _controller.AddDownload(cliItem, startNow, _launch.HoldInQueue);
+                    _hadWorkSinceLaunch = startNow;
+                    RefreshDownloadList();
+
+                    if (_launch.HoldInQueue && _launch.ExitOnComplete)
+                    {
+                        _forceExit = true;
+                        Close();
+                        return;
+                    }
+                }
+                else
+                {
+                    PromptAddDownload(_launch.AddUrl, _launch.Referer, _launch.Cookies);
+                }
+            }
+
+            if (_launch.AutoExitMs > 0)
             {
                 System.Windows.Forms.Timer autoClose = new System.Windows.Forms.Timer();
-                autoClose.Interval = _autoExitMs;
+                autoClose.Interval = _launch.AutoExitMs;
                 autoClose.Tick += delegate
                 {
                     autoClose.Stop();
@@ -454,11 +802,22 @@ namespace MHSManager
             RefreshDownloadList();
             UpdateInspectorFromSelection(true);
 
+            if (_dropTargetForm != null && !_dropTargetForm.IsDisposed)
+            {
+                _dropTargetForm.RefreshOverlay();
+            }
+
+            int activeNow = _controller.ActiveDownloadCount;
+            if (activeNow > 0)
+            {
+                _hadWorkSinceLaunch = true;
+            }
+
             List<DownloadItem> snap = _controller.GetDownloadsSnapshot();
             _lblStatusCounts.Text = string.Format(
                 "Downloads: {0} total  •  {1} active",
                 snap.Count,
-                _controller.ActiveDownloadCount);
+                activeNow);
 
             string capNote = _controller.Settings.EnableGlobalSpeedLimit
                 ? string.Format(" (Cap: {0})", FormattingHelpers.FormatSpeed(_controller.Settings.GlobalSpeedLimitBytesPerSec))
@@ -467,13 +826,26 @@ namespace MHSManager
 
             if (_bridge != null && _bridge.IsRunning)
             {
-                _lblStatusBridge.Text = string.Format("Browser Bridge: 127.0.0.1:{0} ONLINE", _bridge.Port);
+                _lblStatusBridge.Text = string.Format("Browser Bridge: 127.0.0.1:{0} ONLINE (Token Protected)", _bridge.Port);
                 _lblStatusBridge.ForeColor = MhsTheme.AccentEmerald;
             }
             else
             {
                 _lblStatusBridge.Text = "Browser Bridge: OFFLINE";
                 _lblStatusBridge.ForeColor = MhsTheme.TextSecondary;
+            }
+
+            if (_hadWorkSinceLaunch && !_controller.HasActiveOrQueuedWork())
+            {
+                if (_launch.StopQueueOnComplete)
+                {
+                    _controller.StopQueue("Main Queue");
+                }
+                if (_launch.ExitOnComplete)
+                {
+                    _forceExit = true;
+                    Close();
+                }
             }
         }
 
@@ -482,7 +854,8 @@ namespace MHSManager
             if (!string.IsNullOrEmpty(search))
             {
                 bool hit = (d.FileName != null && d.FileName.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0) ||
-                           (d.Url != null && d.Url.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0);
+                           (d.Url != null && d.Url.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                           (d.Description != null && d.Description.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0);
                 if (!hit) return false;
             }
 
@@ -502,6 +875,66 @@ namespace MHSManager
             return true;
         }
 
+        private void OnColumnClicked(object sender, ColumnClickEventArgs e)
+        {
+            if (_sortColumnIndex == e.Column)
+            {
+                _sortAscending = !_sortAscending;
+            }
+            else
+            {
+                _sortColumnIndex = e.Column;
+                _sortAscending = true;
+            }
+            RefreshDownloadList();
+        }
+
+        private void SortFilteredList(List<DownloadItem> list)
+        {
+            if (_sortColumnIndex < 0 || list.Count <= 1) return;
+            int col = _sortColumnIndex;
+            int dir = _sortAscending ? 1 : -1;
+
+            list.Sort(delegate(DownloadItem a, DownloadItem b)
+            {
+                int cmp = 0;
+                switch (col)
+                {
+                    case 0:
+                        cmp = string.Compare(a.FileName ?? "", b.FileName ?? "", StringComparison.OrdinalIgnoreCase);
+                        break;
+                    case 1:
+                        cmp = a.TotalBytes.CompareTo(b.TotalBytes);
+                        break;
+                    case 2:
+                        cmp = a.ProgressPercent.CompareTo(b.ProgressPercent);
+                        if (cmp == 0) cmp = a.Status.CompareTo(b.Status);
+                        break;
+                    case 3:
+                        cmp = a.CurrentSpeedBytesPerSec.CompareTo(b.CurrentSpeedBytesPerSec);
+                        break;
+                    case 5:
+                        cmp = a.SupportsRanges.CompareTo(b.SupportsRanges);
+                        break;
+                    case 7:
+                        cmp = string.Compare(a.CategoryName ?? "", b.CategoryName ?? "", StringComparison.OrdinalIgnoreCase);
+                        break;
+                    case 8:
+                        cmp = string.Compare(a.QueueName ?? "", b.QueueName ?? "", StringComparison.OrdinalIgnoreCase);
+                        break;
+                    case 9:
+                        DateTime ta = a.LastTryUtc ?? a.AddedUtc;
+                        DateTime tb = b.LastTryUtc ?? b.AddedUtc;
+                        cmp = ta.CompareTo(tb);
+                        break;
+                    default:
+                        cmp = a.AddedUtc.CompareTo(b.AddedUtc);
+                        break;
+                }
+                return cmp * dir;
+            });
+        }
+
         private void RefreshDownloadList()
         {
             List<DownloadItem> all = _controller.GetDownloadsSnapshot();
@@ -515,6 +948,8 @@ namespace MHSManager
                     filtered.Add(all[i]);
                 }
             }
+
+            SortFilteredList(filtered);
 
             Dictionary<string, ListViewItem> existingById = new Dictionary<string, ListViewItem>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < _lvDownloads.Items.Count; i++)
@@ -575,7 +1010,7 @@ namespace MHSManager
         {
             ListViewItem lvi = new ListViewItem(item.FileName ?? "");
             lvi.Tag = item;
-            for (int i = 0; i < 8; i++) lvi.SubItems.Add("");
+            for (int i = 0; i < 9; i++) lvi.SubItems.Add("");
             return lvi;
         }
 
@@ -583,20 +1018,30 @@ namespace MHSManager
         {
             row.Tag = d;
             string c0 = d.FileName ?? "download.bin";
-            string c1 = d.TotalBytes > 0 ? FormattingHelpers.FormatBytes(d.TotalBytes) : (d.DownloadedBytes > 0 ? FormattingHelpers.FormatBytes(d.DownloadedBytes) : "--");
+            string c1 = d.TotalBytes > 0
+                ? FormattingHelpers.FormatBytes(d.TotalBytes)
+                : (d.DownloadedBytes > 0 ? FormattingHelpers.FormatBytes(d.DownloadedBytes) : "--");
 
             string c2;
             if (d.Status == DownloadStatus.Completed)
             {
-                c2 = "Completed (100%)";
+                c2 = "Complete";
             }
             else if (d.Status == DownloadStatus.Downloading)
             {
-                c2 = string.Format("Downloading {0:0.1}%", d.ProgressPercent);
+                c2 = string.Format("{0:0.1}%", d.ProgressPercent);
             }
             else if (d.Status == DownloadStatus.Error)
             {
-                c2 = "Error";
+                if (d.NextRetryUtc.HasValue)
+                {
+                    int secLeft = Math.Max(1, (int)(d.NextRetryUtc.Value - DateTime.UtcNow).TotalSeconds);
+                    c2 = string.Format("Retry in {0}s", secLeft);
+                }
+                else
+                {
+                    c2 = "Error";
+                }
             }
             else
             {
@@ -606,12 +1051,14 @@ namespace MHSManager
             string c3 = d.Status == DownloadStatus.Downloading ? FormattingHelpers.FormatSpeed(d.CurrentSpeedBytesPerSec) : "--";
             long rem = d.TotalBytes > d.DownloadedBytes ? (d.TotalBytes - d.DownloadedBytes) : 0;
             string c4 = d.Status == DownloadStatus.Downloading ? FormattingHelpers.FormatEta(rem, d.CurrentSpeedBytesPerSec) : "--";
-            string c5 = d.Status == DownloadStatus.Downloading
+            string c5 = (d.SupportsRanges || d.IsHlsStream) ? "Yes" : (d.TotalBytes > 0 ? "No" : "--");
+            string c6 = d.Status == DownloadStatus.Downloading
                 ? string.Format("{0}/{1}", d.ActiveConnections, d.MaxConnections)
                 : d.MaxConnections.ToString();
-            string c6 = d.CategoryName ?? "General";
-            string c7 = d.QueueName ?? "Main Queue";
-            string c8 = d.AddedUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm");
+            string c7 = d.CategoryName ?? "General";
+            string c8 = d.QueueName ?? "Main Queue";
+            DateTime stamp = (d.LastTryUtc ?? d.AddedUtc).ToLocalTime();
+            string c9 = stamp.ToString("yyyy-MM-dd HH:mm");
 
             if (row.SubItems[0].Text != c0) row.SubItems[0].Text = c0;
             if (row.SubItems[1].Text != c1) row.SubItems[1].Text = c1;
@@ -622,6 +1069,25 @@ namespace MHSManager
             if (row.SubItems[6].Text != c6) row.SubItems[6].Text = c6;
             if (row.SubItems[7].Text != c7) row.SubItems[7].Text = c7;
             if (row.SubItems[8].Text != c8) row.SubItems[8].Text = c8;
+            if (row.SubItems[9].Text != c9) row.SubItems[9].Text = c9;
+        }
+
+        private void OnDownloadItemDrag(object sender, ItemDragEventArgs e)
+        {
+            List<DownloadItem> selected = GetAllSelectedItems();
+            List<string> files = new List<string>();
+            for (int i = 0; i < selected.Count; i++)
+            {
+                if (selected[i].Status == DownloadStatus.Completed && File.Exists(selected[i].FullTargetPath))
+                {
+                    files.Add(selected[i].FullTargetPath);
+                }
+            }
+            if (files.Count > 0)
+            {
+                DataObject data = new DataObject(DataFormats.FileDrop, files.ToArray());
+                _lvDownloads.DoDragDrop(data, DragDropEffects.Copy);
+            }
         }
 
         private DownloadItem GetFirstSelectedItem()
@@ -668,19 +1134,13 @@ namespace MHSManager
                 _inspectorSpeedGraph.PushSample(sel.CurrentSpeedBytesPerSec);
             }
 
-            if (sel.RecentLogs != null)
+            string[] logs = sel.GetLogsSnapshot();
+            string joined = logs.Length > 0 ? string.Join("\r\n", logs) : "";
+            if (_txtInspectorLog.Text != joined)
             {
-                string joined;
-                lock (sel.RecentLogs)
-                {
-                    joined = string.Join("\r\n", sel.RecentLogs.ToArray());
-                }
-                if (_txtInspectorLog.Text != joined)
-                {
-                    _txtInspectorLog.Text = joined;
-                    _txtInspectorLog.SelectionStart = _txtInspectorLog.Text.Length;
-                    _txtInspectorLog.ScrollToCaret();
-                }
+                _txtInspectorLog.Text = joined;
+                _txtInspectorLog.SelectionStart = _txtInspectorLog.Text.Length;
+                _txtInspectorLog.ScrollToCaret();
             }
         }
 
@@ -705,11 +1165,20 @@ namespace MHSManager
                 catch { }
             }
 
-            using (AddDownloadDialog dlg = new AddDownloadDialog(_controller.Settings, initialUrl, referer, cookies))
+            using (AddDownloadDialog dlg = new AddDownloadDialog(
+                _controller.Settings,
+                initialUrl,
+                referer,
+                cookies,
+                _controller.GetDownloadsSnapshot()))
             {
                 if (dlg.ShowDialog(this) == DialogResult.OK && dlg.ResultItem != null)
                 {
-                    _controller.AddDownload(dlg.ResultItem, dlg.StartImmediately);
+                    _controller.AddDownload(dlg.ResultItem, dlg.StartImmediately, dlg.HoldPausedInQueue);
+                    if (dlg.StartImmediately || !dlg.HoldPausedInQueue)
+                    {
+                        _hadWorkSinceLaunch = true;
+                    }
                     RefreshDownloadList();
                 }
             }
@@ -720,7 +1189,8 @@ namespace MHSManager
             if (IsDisposed) return;
             BeginInvoke((MethodInvoker)delegate
             {
-                if (_controller.Settings.ShowProgressDialogOnStart && _autoExitMs <= 0)
+                _hadWorkSinceLaunch = true;
+                if (_controller.Settings.ShowProgressDialogOnStart && !IsAutomatedSilentSession)
                 {
                     ShowFloatingProgressWindow(item);
                 }
@@ -733,9 +1203,16 @@ namespace MHSManager
             BeginInvoke((MethodInvoker)delegate
             {
                 RefreshDownloadList();
+
+                DownloadProgressDialog openProg;
+                if (_openDialogs.TryGetValue(item.Id, out openProg) && openProg != null && !openProg.IsDisposed)
+                {
+                    openProg.Close();
+                }
+
                 try
                 {
-                    if (_trayIcon != null)
+                    if (_trayIcon != null && !IsAutomatedSilentSession)
                     {
                         _trayIcon.ShowBalloonTip(
                             3000,
@@ -745,6 +1222,45 @@ namespace MHSManager
                     }
                 }
                 catch { }
+
+                if (_controller.Settings.ShowDownloadCompleteDialog &&
+                    !IsAutomatedSilentSession &&
+                    item.OnComplete == CompletionAction.None)
+                {
+                    DownloadCompleteDialog completeDlg = new DownloadCompleteDialog(_controller, item);
+                    completeDlg.Show(this);
+                }
+
+                if (_launch.ExitOnComplete && !_controller.HasActiveOrQueuedWork())
+                {
+                    _forceExit = true;
+                    Close();
+                }
+            });
+        }
+
+        private void OnQueuePostActionTriggered(QueueDefinition q)
+        {
+            if (IsDisposed || q == null) return;
+            BeginInvoke((MethodInvoker)delegate
+            {
+                if (q.PostCompletionAction == QueuePostAction.ExitApp)
+                {
+                    _forceExit = true;
+                    Close();
+                }
+                else if (q.PostCompletionAction == QueuePostAction.Sleep)
+                {
+                    Application.SetSuspendState(PowerState.Suspend, false, false);
+                }
+                else if (q.PostCompletionAction == QueuePostAction.Hibernate)
+                {
+                    Application.SetSuspendState(PowerState.Hibernate, false, false);
+                }
+                else if (q.PostCompletionAction == QueuePostAction.Shutdown)
+                {
+                    try { Process.Start("shutdown.exe", "/s /t 30"); } catch { }
+                }
             });
         }
 
@@ -755,6 +1271,47 @@ namespace MHSManager
             {
                 RestoreFromTray();
                 PromptAddDownload(req.url, req.referer, req.cookies);
+            });
+        }
+
+        private void OnBridgeRequestShowBatchDialog(BrowserBatchRequest batch)
+        {
+            if (IsDisposed) return;
+            BeginInvoke((MethodInvoker)delegate
+            {
+                RestoreFromTray();
+                using (BrowserBatchLinksDialog dlg = new BrowserBatchLinksDialog(_controller.Settings, batch))
+                {
+                    if (dlg.ShowDialog(this) == DialogResult.OK)
+                    {
+                        for (int i = 0; i < dlg.SelectedRequests.Count; i++)
+                        {
+                            BrowserDownloadRequest r = dlg.SelectedRequests[i];
+                            string fn = !string.IsNullOrWhiteSpace(r.fileName)
+                                ? CategoryClassifier.SanitizeFileName(r.fileName)
+                                : CategoryClassifier.GuessFileNameFromUrl(r.url);
+                            string cat = CategoryClassifier.ClassifyByFileName(fn);
+                            DownloadItem item = new DownloadItem
+                            {
+                                Url = r.url,
+                                FileName = fn,
+                                CategoryName = cat,
+                                QueueName = dlg.SelectedQueue,
+                                SaveDirectory = CategoryClassifier.ResolveSaveDirectory(_controller.Settings, cat),
+                                Referer = r.referer,
+                                Cookies = r.cookies,
+                                UserAgent = r.userAgent,
+                                MaxConnections = _controller.Settings.DefaultConnectionsPerDownload
+                            };
+                            _controller.AddDownload(item, false, !dlg.StartQueueImmediately);
+                        }
+                        if (dlg.StartQueueImmediately)
+                        {
+                            _controller.StartQueue(dlg.SelectedQueue);
+                        }
+                        RefreshDownloadList();
+                    }
+                }
             });
         }
 
@@ -797,6 +1354,47 @@ namespace MHSManager
             {
                 _controller.PauseDownload(items[i].Id);
             }
+            RefreshDownloadList();
+        }
+
+        private void RedownloadSelected()
+        {
+            DownloadItem sel = GetFirstSelectedItem();
+            if (sel == null) return;
+            _controller.RedownloadFromBeginning(sel.Id);
+            RefreshDownloadList();
+        }
+
+        private void RefreshSelectedAddress()
+        {
+            DownloadItem sel = GetFirstSelectedItem();
+            if (sel == null) return;
+            using (RefreshAddressDialog dlg = new RefreshAddressDialog(_controller, sel))
+            {
+                dlg.ShowDialog(this);
+                RefreshDownloadList();
+            }
+        }
+
+        private void OpenSelectedProperties()
+        {
+            DownloadItem sel = GetFirstSelectedItem();
+            if (sel == null) return;
+            using (FilePropertiesDialog dlg = new FilePropertiesDialog(_controller, sel))
+            {
+                dlg.ShowDialog(this);
+                RefreshDownloadList();
+            }
+        }
+
+        private void MoveSelectedToQueue(string queueName)
+        {
+            List<DownloadItem> items = GetAllSelectedItems();
+            for (int i = 0; i < items.Count; i++)
+            {
+                items[i].QueueName = queueName;
+            }
+            _controller.SaveStateSafe();
             RefreshDownloadList();
         }
 
@@ -852,6 +1450,20 @@ namespace MHSManager
             }
         }
 
+        private void OpenSelectedFileWith()
+        {
+            DownloadItem sel = GetFirstSelectedItem();
+            if (sel == null || !File.Exists(sel.FullTargetPath)) return;
+            try
+            {
+                Process.Start("rundll32.exe", "shell32.dll,OpenAs_RunDLL " + sel.FullTargetPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Open With", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         private void VerifySelectedChecksum()
         {
             DownloadItem sel = GetFirstSelectedItem();
@@ -893,6 +1505,109 @@ namespace MHSManager
             }
         }
 
+        private void ImportBatchFromClipboard()
+        {
+            try
+            {
+                if (!Clipboard.ContainsText())
+                {
+                    MessageBox.Show(this, "Clipboard does not contain any text URLs.", "Clipboard Batch", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                List<ImportedDownloadSpec> parsed = IdmEf2Serializer.ParseTextUrlList(Clipboard.GetText());
+                if (parsed.Count == 0)
+                {
+                    MessageBox.Show(this, "No valid http:// or https:// URLs found in clipboard.", "Clipboard Batch", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                BrowserBatchRequest batch = new BrowserBatchRequest { links = new List<BrowserDownloadRequest>() };
+                for (int i = 0; i < parsed.Count; i++)
+                {
+                    batch.links.Add(new BrowserDownloadRequest { url = parsed[i].Url });
+                }
+                OnBridgeRequestShowBatchDialog(batch);
+            }
+            catch { }
+        }
+
+        private void ImportDownloadsFromFile(bool ef2Format)
+        {
+            using (OpenFileDialog ofd = new OpenFileDialog())
+            {
+                ofd.Filter = ef2Format
+                    ? "IDM Export Files (*.ef2)|*.ef2|All Files (*.*)|*.*"
+                    : "Text URL Lists (*.txt)|*.txt|All Files (*.*)|*.*";
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    string raw = File.ReadAllText(ofd.FileName, Encoding.UTF8);
+                    List<ImportedDownloadSpec> list = ef2Format
+                        ? IdmEf2Serializer.ParseEf2(raw)
+                        : IdmEf2Serializer.ParseTextUrlList(raw);
+
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        ImportedDownloadSpec spec = list[i];
+                        bool explicitFn = !string.IsNullOrWhiteSpace(spec.FileName);
+                        string fn = explicitFn ? spec.FileName : CategoryClassifier.GuessFileNameFromUrl(spec.Url);
+                        string cat = CategoryClassifier.ClassifyByFileName(fn);
+                        DownloadItem item = new DownloadItem
+                        {
+                            Url = spec.Url,
+                            FileName = fn,
+                            HasExplicitFileName = explicitFn,
+                            CategoryName = cat,
+                            SaveDirectory = CategoryClassifier.ResolveSaveDirectory(_controller.Settings, cat),
+                            Referer = spec.Referer,
+                            Cookies = spec.Cookies,
+                            UserAgent = spec.UserAgent,
+                            AuthUser = spec.AuthUser,
+                            AuthPassword = spec.AuthPassword,
+                            MaxConnections = _controller.Settings.DefaultConnectionsPerDownload
+                        };
+                        _controller.AddDownload(item, false, false);
+                    }
+                    RefreshDownloadList();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, ex.Message, "Import Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void ExportDownloadsToFile(bool ef2Format)
+        {
+            List<DownloadItem> targets = GetAllSelectedItems();
+            if (targets.Count == 0)
+            {
+                targets = _controller.GetDownloadsSnapshot();
+            }
+            if (targets.Count == 0) return;
+
+            using (SaveFileDialog sfd = new SaveFileDialog())
+            {
+                sfd.Filter = ef2Format
+                    ? "IDM Export File (*.ef2)|*.ef2"
+                    : "Text URL List (*.txt)|*.txt";
+                sfd.FileName = ef2Format ? "downloads.ef2" : "downloads.txt";
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    string text = ef2Format
+                        ? IdmEf2Serializer.ExportToEf2(targets)
+                        : IdmEf2Serializer.ExportToTextList(targets);
+                    File.WriteAllText(sfd.FileName, text, StateRepository.Utf8NoBom);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, ex.Message, "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
         private void OpenBatchDialog()
         {
             using (BatchDownloadDialog dlg = new BatchDownloadDialog(_controller.Settings))
@@ -913,7 +1628,7 @@ namespace MHSManager
                             SaveDirectory = CategoryClassifier.ResolveSaveDirectory(_controller.Settings, cat),
                             MaxConnections = _controller.Settings.DefaultConnectionsPerDownload
                         };
-                        _controller.AddDownload(item, false);
+                        _controller.AddDownload(item, false, !dlg.StartImmediately);
                     }
                     if (dlg.StartImmediately)
                     {
@@ -942,7 +1657,7 @@ namespace MHSManager
                             SaveDirectory = CategoryClassifier.ResolveSaveDirectory(_controller.Settings, g.Category),
                             MaxConnections = _controller.Settings.DefaultConnectionsPerDownload
                         };
-                        _controller.AddDownload(item, false);
+                        _controller.AddDownload(item, false, false);
                     }
                     RefreshDownloadList();
                 }
@@ -954,6 +1669,7 @@ namespace MHSManager
             using (SettingsAndSchedulerDialog dlg = new SettingsAndSchedulerDialog(_controller, _bridge, tabIndex))
             {
                 dlg.ShowDialog(this);
+                PopulateNavigationTree();
                 UpdateSpeedButtonVisual();
                 RefreshDownloadList();
             }
@@ -961,7 +1677,7 @@ namespace MHSManager
 
         private void HandleClipboardChanged()
         {
-            if (!_controller.Settings.EnableClipboardMonitor || _clipboardDialogOpen || _autoExitMs > 0)
+            if (!_controller.Settings.EnableClipboardMonitor || _clipboardDialogOpen || IsAutomatedSilentSession)
             {
                 return;
             }
@@ -977,7 +1693,7 @@ namespace MHSManager
                 Uri uri;
                 if (!Uri.TryCreate(text, UriKind.Absolute, out uri)) return;
                 if (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps) return;
-
+                if (HostExclusionMatcher.IsExcluded(text, null, _controller.Settings.ExcludedHosts)) return;
                 if (!MatchesMonitoredExtension(uri.AbsolutePath)) return;
 
                 _clipboardDialogOpen = true;
@@ -1053,6 +1769,10 @@ namespace MHSManager
 
             _uiTimer.Stop();
             _uiTimer.Dispose();
+            if (_dropTargetForm != null && !_dropTargetForm.IsDisposed)
+            {
+                _dropTargetForm.Close();
+            }
             if (_trayIcon != null)
             {
                 _trayIcon.Visible = false;
@@ -1062,4 +1782,3 @@ namespace MHSManager
         }
     }
 }
-

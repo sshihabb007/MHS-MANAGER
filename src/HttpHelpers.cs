@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Security.Cryptography;
@@ -49,6 +51,58 @@ namespace MHSManager
             }
         }
 
+        public static SiteLoginEntry FindMatchingSiteLogin(string url, List<SiteLoginEntry> logins)
+        {
+            if (string.IsNullOrWhiteSpace(url) || logins == null || logins.Count == 0)
+            {
+                return null;
+            }
+
+            Uri uri;
+            string host = "";
+            if (Uri.TryCreate(url.Trim(), UriKind.Absolute, out uri))
+            {
+                host = uri.Host ?? "";
+            }
+
+            SiteLoginEntry best = null;
+            int bestLen = -1;
+
+            for (int i = 0; i < logins.Count; i++)
+            {
+                SiteLoginEntry entry = logins[i];
+                if (entry == null || string.IsNullOrWhiteSpace(entry.HostPrefix) || string.IsNullOrWhiteSpace(entry.UserName))
+                {
+                    continue;
+                }
+
+                string pat = entry.HostPrefix.Trim();
+                bool matched = false;
+                if (pat.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    pat.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    matched = url.StartsWith(pat, StringComparison.OrdinalIgnoreCase);
+                }
+                else if (!string.IsNullOrEmpty(host))
+                {
+                    if (string.Equals(host, pat, StringComparison.OrdinalIgnoreCase) ||
+                        host.EndsWith("." + pat.TrimStart('*', '.'), StringComparison.OrdinalIgnoreCase) ||
+                        HostExclusionMatcher.WildcardMatch(host, pat))
+                    {
+                        matched = true;
+                    }
+                }
+
+                if (matched && pat.Length > bestLen)
+                {
+                    best = entry;
+                    bestLen = pat.Length;
+                }
+            }
+
+            return best;
+        }
+
         public static HttpWebRequest CreateRequest(
             string url,
             string userAgent,
@@ -58,6 +112,20 @@ namespace MHSManager
             string authPassword,
             int timeoutMs,
             bool allowCompression)
+        {
+            return CreateRequest(url, userAgent, referer, cookies, authUser, authPassword, timeoutMs, allowCompression, null);
+        }
+
+        public static HttpWebRequest CreateRequest(
+            string url,
+            string userAgent,
+            string referer,
+            string cookies,
+            string authUser,
+            string authPassword,
+            int timeoutMs,
+            bool allowCompression,
+            AppSettings settings)
         {
             EnsureNetworkingConfigured();
 
@@ -79,8 +147,38 @@ namespace MHSManager
                 req.ServicePoint.UseNagleAlgorithm = false;
             }
 
-            req.UserAgent = !string.IsNullOrWhiteSpace(userAgent)
-                ? userAgent
+            if (settings != null)
+            {
+                if (settings.ProxyType == ProxyMode.None)
+                {
+                    req.Proxy = null;
+                }
+                else if (settings.ProxyType == ProxyMode.Manual &&
+                         !string.IsNullOrWhiteSpace(settings.ProxyAddress) &&
+                         settings.ProxyPort > 0)
+                {
+                    try
+                    {
+                        WebProxy proxy = new WebProxy(settings.ProxyAddress.Trim(), settings.ProxyPort);
+                        if (!string.IsNullOrWhiteSpace(settings.ProxyUser))
+                        {
+                            proxy.Credentials = new NetworkCredential(settings.ProxyUser.Trim(), settings.ProxyPassword ?? "");
+                        }
+                        req.Proxy = proxy;
+                    }
+                    catch
+                    {
+                    }
+                }
+            }
+
+            string effectiveUa = userAgent;
+            if (string.IsNullOrWhiteSpace(effectiveUa) && settings != null)
+            {
+                effectiveUa = settings.DefaultUserAgent;
+            }
+            req.UserAgent = !string.IsNullOrWhiteSpace(effectiveUa)
+                ? effectiveUa
                 : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
             req.Accept = "*/*";
@@ -102,10 +200,22 @@ namespace MHSManager
                 req.Headers["Cookie"] = cookies.Trim();
             }
 
-            if (!string.IsNullOrWhiteSpace(authUser))
+            string effectiveUser = authUser;
+            string effectivePass = authPassword;
+            if (string.IsNullOrWhiteSpace(effectiveUser) && settings != null && settings.SiteLogins != null)
             {
-                req.Credentials = new NetworkCredential(authUser.Trim(), authPassword ?? "");
-                string pair = authUser.Trim() + ":" + (authPassword ?? "");
+                SiteLoginEntry login = FindMatchingSiteLogin(url, settings.SiteLogins);
+                if (login != null)
+                {
+                    effectiveUser = login.UserName;
+                    effectivePass = login.Password;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(effectiveUser))
+            {
+                req.Credentials = new NetworkCredential(effectiveUser.Trim(), effectivePass ?? "");
+                string pair = effectiveUser.Trim() + ":" + (effectivePass ?? "");
                 string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(pair));
                 req.Headers["Authorization"] = "Basic " + b64;
             }
@@ -162,7 +272,6 @@ namespace MHSManager
         public static long ParseTotalFromContentRange(string contentRange)
         {
             if (string.IsNullOrWhiteSpace(contentRange)) return -1;
-            // Format: bytes 0-0/123456
             int slashIdx = contentRange.LastIndexOf('/');
             if (slashIdx < 0 || slashIdx + 1 >= contentRange.Length) return -1;
             string totalPart = contentRange.Substring(slashIdx + 1).Trim();
@@ -173,6 +282,19 @@ namespace MHSManager
                 return total;
             }
             return -1;
+        }
+
+        public static bool TryParseHttpDate(string headerValue, out DateTime utcTime)
+        {
+            utcTime = DateTime.MinValue;
+            if (string.IsNullOrWhiteSpace(headerValue)) return false;
+            DateTimeOffset dto;
+            if (DateTimeOffset.TryParse(headerValue.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out dto))
+            {
+                utcTime = dto.UtcDateTime;
+                return true;
+            }
+            return false;
         }
 
         public static bool IsHlsUrlOrMime(string url, string contentType)
@@ -267,17 +389,38 @@ namespace MHSManager
 
         public static string EnsureNonM3u8VideoFileName(string fileName)
         {
-            if (string.IsNullOrWhiteSpace(fileName)) return "stream.ts";
+            return EnsureHlsOutputFileName(fileName, false, false);
+        }
+
+        public static string EnsureHlsOutputFileName(string fileName, bool isFmp4, bool hasExplicitFileName)
+        {
+            if (hasExplicitFileName && !string.IsNullOrWhiteSpace(fileName))
+            {
+                return fileName;
+            }
+
+            string extTarget = isFmp4 ? ".mp4" : ".ts";
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                return "stream" + extTarget;
+            }
             if (fileName.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase))
             {
-                return fileName.Substring(0, fileName.Length - 5) + ".ts";
+                return fileName.Substring(0, fileName.Length - 5) + extTarget;
+            }
+            if (isFmp4 && fileName.EndsWith(".ts", StringComparison.OrdinalIgnoreCase))
+            {
+                return fileName.Substring(0, fileName.Length - 3) + ".mp4";
+            }
+            if (fileName.EndsWith(".bin", StringComparison.OrdinalIgnoreCase))
+            {
+                return fileName.Substring(0, fileName.Length - 4) + extTarget;
             }
             if (string.IsNullOrEmpty(Path.GetExtension(fileName)))
             {
-                return fileName + ".ts";
+                return fileName + extTarget;
             }
             return fileName;
         }
     }
 }
-

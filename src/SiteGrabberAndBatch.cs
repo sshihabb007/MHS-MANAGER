@@ -127,14 +127,24 @@ namespace MHSManager
             @"https?://[^\s""'<>\\]+?\.(?:m3u8|mp4|mkv|webm|mp3|zip|7z|rar|iso|exe|msi|pdf)(?:\?[^\s""'<>\\]*)?",
             RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-        public static async Task<List<GrabbedLink>> GrabLinksAsync(
+        public static Task<List<GrabbedLink>> GrabLinksAsync(
             string pageUrl,
             string userAgent,
             string cookies,
             CancellationToken token)
         {
+            return GrabLinksAsync(pageUrl, userAgent, cookies, null, token);
+        }
+
+        public static async Task<List<GrabbedLink>> GrabLinksAsync(
+            string pageUrl,
+            string userAgent,
+            string cookies,
+            AppSettings settings,
+            CancellationToken token)
+        {
             HttpWebRequest req = HttpHelpers.CreateRequest(
-                pageUrl, userAgent, pageUrl, cookies, null, null, 20000, true);
+                pageUrl, userAgent, pageUrl, cookies, null, null, 20000, true, settings);
 
             string html;
             Uri effectiveBaseUri = new Uri(pageUrl);
@@ -192,6 +202,45 @@ namespace MHSManager
             return results;
         }
 
+        public static bool IsHtmlPageLink(string url, string fileName)
+        {
+            string ext = Path.GetExtension(fileName ?? "");
+            if (string.Equals(ext, ".html", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ext, ".htm", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ext, ".php", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ext, ".asp", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ext, ".aspx", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(ext, ".jsp", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+            if (string.Equals(ext, ".bin", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    Uri u = new Uri(url);
+                    string pathExt = Path.GetExtension(u.AbsolutePath);
+                    if (string.IsNullOrEmpty(pathExt)) return true;
+                }
+                catch
+                {
+                }
+            }
+            return false;
+        }
+
+        public static bool IsImageLink(string fileName)
+        {
+            string ext = Path.GetExtension(fileName ?? "");
+            return string.Equals(ext, ".png", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(ext, ".jpg", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(ext, ".jpeg", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(ext, ".gif", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(ext, ".webp", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(ext, ".svg", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(ext, ".ico", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void AddCandidate(
             Uri baseUri,
             string rawHref,
@@ -231,5 +280,172 @@ namespace MHSManager
             });
         }
     }
-}
 
+    public sealed class ImportedDownloadSpec
+    {
+        public string Url { get; set; }
+        public string FileName { get; set; }
+        public string Referer { get; set; }
+        public string Cookies { get; set; }
+        public string UserAgent { get; set; }
+        public string AuthUser { get; set; }
+        public string AuthPassword { get; set; }
+    }
+
+    /// <summary>
+    /// Compatible reader/writer for Internet Download Manager (.ef2) export files and plain .txt URL lists.
+    /// </summary>
+    public static class IdmEf2Serializer
+    {
+        public static string ExportToEf2(IEnumerable<DownloadItem> items)
+        {
+            StringBuilder sb = new StringBuilder();
+            if (items == null) return "";
+
+            foreach (DownloadItem d in items)
+            {
+                if (d == null || string.IsNullOrWhiteSpace(d.Url)) continue;
+                sb.Append("<\r\n");
+                sb.Append(d.Url.Trim()).Append("\r\n");
+                if (!string.IsNullOrWhiteSpace(d.Referer))
+                {
+                    sb.Append("referer: ").Append(d.Referer.Trim()).Append("\r\n");
+                }
+                if (!string.IsNullOrWhiteSpace(d.Cookies))
+                {
+                    sb.Append("cookies: ").Append(d.Cookies.Trim()).Append("\r\n");
+                }
+                if (!string.IsNullOrWhiteSpace(d.UserAgent))
+                {
+                    sb.Append("User-Agent: ").Append(d.UserAgent.Trim()).Append("\r\n");
+                }
+                if (!string.IsNullOrWhiteSpace(d.FileName) && d.HasExplicitFileName)
+                {
+                    sb.Append("filename: ").Append(d.FileName.Trim()).Append("\r\n");
+                }
+                sb.Append(">\r\n");
+            }
+            return sb.ToString();
+        }
+
+        public static string ExportToTextList(IEnumerable<DownloadItem> items)
+        {
+            StringBuilder sb = new StringBuilder();
+            if (items == null) return "";
+            foreach (DownloadItem d in items)
+            {
+                if (d == null || string.IsNullOrWhiteSpace(d.Url)) continue;
+                sb.Append(d.Url.Trim()).Append("\r\n");
+            }
+            return sb.ToString();
+        }
+
+        public static List<ImportedDownloadSpec> ParseEf2(string content)
+        {
+            List<ImportedDownloadSpec> results = new List<ImportedDownloadSpec>();
+            if (string.IsNullOrWhiteSpace(content)) return results;
+
+            string[] lines = content.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            ImportedDownloadSpec current = null;
+
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (line == "<")
+                {
+                    current = new ImportedDownloadSpec();
+                    continue;
+                }
+                if (line == ">")
+                {
+                    if (current != null && !string.IsNullOrWhiteSpace(current.Url))
+                    {
+                        results.Add(current);
+                    }
+                    current = null;
+                    continue;
+                }
+
+                if (current == null)
+                {
+                    Uri standalone;
+                    if (Uri.TryCreate(line, UriKind.Absolute, out standalone) &&
+                        (standalone.Scheme == Uri.UriSchemeHttp || standalone.Scheme == Uri.UriSchemeHttps))
+                    {
+                        results.Add(new ImportedDownloadSpec { Url = line });
+                    }
+                    continue;
+                }
+
+                if (string.IsNullOrWhiteSpace(current.Url) &&
+                    (line.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                     line.StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+                {
+                    current.Url = line;
+                    continue;
+                }
+
+                int colon = line.IndexOf(':');
+                if (colon > 0)
+                {
+                    string key = line.Substring(0, colon).Trim();
+                    string val = line.Substring(colon + 1).Trim();
+                    if (string.Equals(key, "referer", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current.Referer = val;
+                    }
+                    else if (string.Equals(key, "cookies", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(key, "cookie", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current.Cookies = val;
+                    }
+                    else if (string.Equals(key, "user-agent", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current.UserAgent = val;
+                    }
+                    else if (string.Equals(key, "filename", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current.FileName = CategoryClassifier.SanitizeFileName(val);
+                    }
+                    else if (string.Equals(key, "username", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current.AuthUser = val;
+                    }
+                    else if (string.Equals(key, "password", StringComparison.OrdinalIgnoreCase))
+                    {
+                        current.AuthPassword = val;
+                    }
+                }
+            }
+
+            if (current != null && !string.IsNullOrWhiteSpace(current.Url))
+            {
+                results.Add(current);
+            }
+
+            return results;
+        }
+
+        public static List<ImportedDownloadSpec> ParseTextUrlList(string content)
+        {
+            List<ImportedDownloadSpec> list = new List<ImportedDownloadSpec>();
+            if (string.IsNullOrWhiteSpace(content)) return list;
+
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string[] lines = content.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < lines.Length; i++)
+            {
+                string line = lines[i].Trim();
+                if (string.IsNullOrEmpty(line) || line.StartsWith("#") || line.StartsWith(";")) continue;
+                Uri u;
+                if (Uri.TryCreate(line, UriKind.Absolute, out u) &&
+                    (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps) &&
+                    seen.Add(u.AbsoluteUri))
+                {
+                    list.Add(new ImportedDownloadSpec { Url = u.AbsoluteUri });
+                }
+            }
+            return list;
+        }
+    }
+}

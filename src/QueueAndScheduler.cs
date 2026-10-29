@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 
 namespace MHSManager
 {
@@ -26,6 +29,7 @@ namespace MHSManager
         public event Action StateUpdated;
         public event Action<DownloadItem> DownloadStarted;
         public event Action<DownloadItem> DownloadCompleted;
+        public event Action<QueueDefinition> QueuePostActionTriggered;
 
         public PersistedState State
         {
@@ -45,6 +49,9 @@ namespace MHSManager
         public DownloadManagerController(PersistedState state)
         {
             _state = state ?? new PersistedState();
+            if (_state.Settings == null) _state.Settings = new AppSettings();
+            if (_state.Downloads == null) _state.Downloads = new List<DownloadItem>();
+
             _runners = new Dictionary<string, DownloadTaskRunner>(StringComparer.OrdinalIgnoreCase);
             _lastSampleBytes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
             _globalLimiter = new TokenBucketLimiter(
@@ -56,6 +63,33 @@ namespace MHSManager
             _lastScheduleMinuteKey = "";
 
             _tickTimer = new Timer(OnTimerTick, null, 1000, 1000);
+        }
+
+        public PersistedState CreatePersistenceSnapshot()
+        {
+            lock (_lock)
+            {
+                PersistedState snap = new PersistedState();
+                snap.Settings = _state.Settings != null
+                    ? _state.Settings.CloneForPersistence()
+                    : new AppSettings();
+                snap.Downloads = new List<DownloadItem>(_state.Downloads.Count);
+                for (int i = 0; i < _state.Downloads.Count; i++)
+                {
+                    DownloadItem d = _state.Downloads[i];
+                    if (d != null)
+                    {
+                        snap.Downloads.Add(d.CloneForPersistence());
+                    }
+                }
+                return snap;
+            }
+        }
+
+        public void SaveStateSafe()
+        {
+            PersistedState snap = CreatePersistenceSnapshot();
+            StateRepository.Save(snap);
         }
 
         public List<DownloadItem> GetDownloadsSnapshot()
@@ -82,6 +116,23 @@ namespace MHSManager
             return null;
         }
 
+        public DownloadItem FindByUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url)) return null;
+            string trimmed = url.Trim();
+            lock (_lock)
+            {
+                for (int i = 0; i < _state.Downloads.Count; i++)
+                {
+                    if (string.Equals((_state.Downloads[i].Url ?? "").Trim(), trimmed, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return _state.Downloads[i];
+                    }
+                }
+            }
+            return null;
+        }
+
         public int ActiveDownloadCount
         {
             get
@@ -93,18 +144,49 @@ namespace MHSManager
             }
         }
 
+        public bool HasActiveOrQueuedWork()
+        {
+            lock (_lock)
+            {
+                if (_runners.Count > 0) return true;
+                for (int i = 0; i < _state.Downloads.Count; i++)
+                {
+                    DownloadItem d = _state.Downloads[i];
+                    if (d.Status == DownloadStatus.Downloading ||
+                        d.Status == DownloadStatus.Probing ||
+                        d.Status == DownloadStatus.Merging)
+                    {
+                        return true;
+                    }
+                    QueueDefinition q = FindQueueLocked(d.QueueName);
+                    if (q != null && q.IsRunning)
+                    {
+                        if (d.Status == DownloadStatus.Queued) return true;
+                        if (d.Status == DownloadStatus.Error && d.NextRetryUtc.HasValue) return true;
+                    }
+                }
+                return false;
+            }
+        }
+
         public DownloadItem AddDownload(DownloadItem item, bool startImmediately)
+        {
+            return AddDownload(item, startImmediately, false);
+        }
+
+        public DownloadItem AddDownload(DownloadItem item, bool startImmediately, bool holdPausedInQueue)
         {
             if (item == null) throw new ArgumentNullException("item");
 
             if (string.IsNullOrWhiteSpace(item.FileName))
             {
                 item.FileName = CategoryClassifier.GuessFileNameFromUrl(item.Url);
+                item.HasExplicitFileName = false;
             }
             if (HttpHelpers.IsHlsUrlOrMime(item.Url, null))
             {
                 item.IsHlsStream = true;
-                item.FileName = HttpHelpers.EnsureNonM3u8VideoFileName(item.FileName);
+                item.FileName = HttpHelpers.EnsureHlsOutputFileName(item.FileName, false, item.HasExplicitFileName);
             }
             if (string.IsNullOrWhiteSpace(item.CategoryName))
             {
@@ -123,7 +205,21 @@ namespace MHSManager
                 item.MaxConnections = _state.Settings.DefaultConnectionsPerDownload;
             }
 
-            EnsureUniqueFileNameIfNew(item);
+            item.RetryCount = 0;
+            item.NextRetryUtc = null;
+            if (holdPausedInQueue && !startImmediately)
+            {
+                item.Status = DownloadStatus.Paused;
+            }
+            else
+            {
+                item.Status = DownloadStatus.Queued;
+            }
+
+            if (!item.OverwriteExisting)
+            {
+                EnsureUniqueFileNameIfNew(item);
+            }
 
             lock (_lock)
             {
@@ -131,14 +227,14 @@ namespace MHSManager
                 _dirty = true;
             }
 
-            StateRepository.Save(_state);
+            SaveStateSafe();
             RaiseStateUpdated();
 
             if (startImmediately)
             {
                 StartDownload(item.Id);
             }
-            else
+            else if (!holdPausedInQueue)
             {
                 PumpRunningQueues();
             }
@@ -146,24 +242,70 @@ namespace MHSManager
             return item;
         }
 
+        private void ResolveAutoFileNameForRunner(DownloadItem item, string suggestedFileName)
+        {
+            if (item == null || item.HasExplicitFileName || string.IsNullOrWhiteSpace(suggestedFileName))
+            {
+                return;
+            }
+
+            string clean = CategoryClassifier.SanitizeFileName(suggestedFileName);
+            if (string.IsNullOrWhiteSpace(clean)) return;
+
+            lock (_lock)
+            {
+                string oldCategory = item.CategoryName;
+                string defaultOldDir = CategoryClassifier.ResolveSaveDirectory(_state.Settings, oldCategory);
+                bool wasUsingDefaultDir = string.Equals(
+                    (item.SaveDirectory ?? "").TrimEnd('\\', '/'),
+                    (defaultOldDir ?? "").TrimEnd('\\', '/'),
+                    StringComparison.OrdinalIgnoreCase);
+
+                string newCat = CategoryClassifier.ClassifyByFileName(clean);
+                item.CategoryName = newCat;
+                if (wasUsingDefaultDir && !File.Exists(item.PartFilePath))
+                {
+                    item.SaveDirectory = CategoryClassifier.ResolveSaveDirectory(_state.Settings, newCat);
+                }
+
+                item.FileName = clean;
+                if (!item.OverwriteExisting)
+                {
+                    EnsureUniqueFileNameLocked(item);
+                }
+                _dirty = true;
+            }
+        }
+
         private void EnsureUniqueFileNameIfNew(DownloadItem item)
+        {
+            lock (_lock)
+            {
+                EnsureUniqueFileNameLocked(item);
+            }
+        }
+
+        private void EnsureUniqueFileNameLocked(DownloadItem item)
         {
             try
             {
                 string dir = item.SaveDirectory;
                 if (string.IsNullOrEmpty(dir)) return;
-                string baseName = Path.GetFileNameWithoutExtension(item.FileName);
-                string ext = Path.GetExtension(item.FileName);
-                string candidate = item.FileName;
+                string clean = CategoryClassifier.SanitizeFileName(item.FileName);
+                if (string.IsNullOrWhiteSpace(clean)) clean = "download.bin";
+
+                string baseName = Path.GetFileNameWithoutExtension(clean);
+                string ext = Path.GetExtension(clean);
+                string candidate = clean;
                 int suffix = 1;
 
                 while (File.Exists(Path.Combine(dir, candidate)) ||
                        File.Exists(Path.Combine(dir, candidate + ".mhspart")) ||
-                       HasDownloadWithTarget(dir, candidate, item.Id))
+                       HasDownloadWithTargetLocked(dir, candidate, item.Id))
                 {
                     candidate = string.Format("{0} ({1}){2}", baseName, suffix, ext);
                     suffix++;
-                    if (suffix > 999) break;
+                    if (suffix > 9999) break;
                 }
                 item.FileName = candidate;
             }
@@ -172,19 +314,16 @@ namespace MHSManager
             }
         }
 
-        private bool HasDownloadWithTarget(string dir, string fileName, string excludeId)
+        private bool HasDownloadWithTargetLocked(string dir, string fileName, string excludeId)
         {
-            lock (_lock)
+            for (int i = 0; i < _state.Downloads.Count; i++)
             {
-                for (int i = 0; i < _state.Downloads.Count; i++)
+                DownloadItem d = _state.Downloads[i];
+                if (string.Equals(d.Id, excludeId, StringComparison.OrdinalIgnoreCase)) continue;
+                if (string.Equals(d.SaveDirectory ?? "", dir ?? "", StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(d.FileName ?? "", fileName ?? "", StringComparison.OrdinalIgnoreCase))
                 {
-                    DownloadItem d = _state.Downloads[i];
-                    if (string.Equals(d.Id, excludeId, StringComparison.OrdinalIgnoreCase)) continue;
-                    if (string.Equals(d.SaveDirectory ?? "", dir ?? "", StringComparison.OrdinalIgnoreCase) &&
-                        string.Equals(d.FileName ?? "", fileName ?? "", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
+                    return true;
                 }
             }
             return false;
@@ -202,7 +341,7 @@ namespace MHSManager
                     return;
                 }
 
-                DownloadItem item = FindById(id);
+                DownloadItem item = FindByIdLocked(id);
                 if (item == null || item.Status == DownloadStatus.Completed)
                 {
                     return;
@@ -210,6 +349,7 @@ namespace MHSManager
 
                 item.Status = DownloadStatus.Probing;
                 item.ErrorMessage = null;
+                item.NextRetryUtc = null;
                 _lastSampleBytes[item.Id] = item.DownloadedBytes;
 
                 runnerToStart = new DownloadTaskRunner(
@@ -217,7 +357,8 @@ namespace MHSManager
                     _state.Settings,
                     _globalLimiter,
                     OnRunnerProgress,
-                    OnRunnerFinished);
+                    OnRunnerFinished,
+                    ResolveAutoFileNameForRunner);
 
                 _runners[item.Id] = runnerToStart;
                 startedItem = item;
@@ -235,6 +376,39 @@ namespace MHSManager
             }
         }
 
+        public void ResumeAllUnfinished()
+        {
+            List<string> ids = new List<string>();
+            lock (_lock)
+            {
+                for (int i = 0; i < _state.Settings.Queues.Count; i++)
+                {
+                    if (string.Equals(_state.Settings.Queues[i].Name, "Main Queue", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _state.Settings.Queues[i].IsRunning = true;
+                    }
+                }
+                for (int i = _state.Downloads.Count - 1; i >= 0; i--)
+                {
+                    DownloadItem d = _state.Downloads[i];
+                    if (d.Status == DownloadStatus.Paused || d.Status == DownloadStatus.Error)
+                    {
+                        d.Status = DownloadStatus.Queued;
+                        d.NextRetryUtc = null;
+                        ids.Add(d.Id);
+                    }
+                }
+                _dirty = true;
+            }
+            PumpRunningQueues();
+            for (int i = 0; i < ids.Count && ActiveDownloadCount < 4; i++)
+            {
+                StartDownload(ids[i]);
+            }
+            SaveStateSafe();
+            RaiseStateUpdated();
+        }
+
         public void PauseDownload(string id)
         {
             DownloadTaskRunner runner = null;
@@ -246,10 +420,11 @@ namespace MHSManager
                 }
                 else
                 {
-                    DownloadItem item = FindById(id);
-                    if (item != null && item.Status == DownloadStatus.Queued)
+                    DownloadItem item = FindByIdLocked(id);
+                    if (item != null && (item.Status == DownloadStatus.Queued || item.Status == DownloadStatus.Error))
                     {
                         item.Status = DownloadStatus.Paused;
+                        item.NextRetryUtc = null;
                         _dirty = true;
                     }
                 }
@@ -269,9 +444,11 @@ namespace MHSManager
                 active = new List<DownloadTaskRunner>(_runners.Values);
                 for (int i = 0; i < _state.Downloads.Count; i++)
                 {
-                    if (_state.Downloads[i].Status == DownloadStatus.Queued)
+                    if (_state.Downloads[i].Status == DownloadStatus.Queued ||
+                        (_state.Downloads[i].Status == DownloadStatus.Error && _state.Downloads[i].NextRetryUtc.HasValue))
                     {
                         _state.Downloads[i].Status = DownloadStatus.Paused;
+                        _state.Downloads[i].NextRetryUtc = null;
                     }
                 }
                 _dirty = true;
@@ -282,11 +459,17 @@ namespace MHSManager
                 active[i].RequestPause();
             }
 
-            StateRepository.Save(_state);
+            SaveStateSafe();
             RaiseStateUpdated();
         }
 
         public void RemoveDownload(string id, bool deleteDiskFiles)
+        {
+            Task cleanupTask = RemoveDownloadAsync(id, deleteDiskFiles);
+            if (cleanupTask == null) { }
+        }
+
+        public async Task RemoveDownloadAsync(string id, bool deleteDiskFiles)
         {
             DownloadItem target = null;
             DownloadTaskRunner runner = null;
@@ -295,7 +478,7 @@ namespace MHSManager
             {
                 if (_runners.TryGetValue(id, out runner))
                 {
-                    runner.RequestPause();
+                    runner.RequestCancelForRemoval();
                     _runners.Remove(id);
                 }
                 for (int i = 0; i < _state.Downloads.Count; i++)
@@ -311,13 +494,136 @@ namespace MHSManager
                 _dirty = true;
             }
 
-            if (target != null)
+            SaveStateSafe();
+            RaiseStateUpdated();
+
+            if (runner != null && runner.ExecutionTask != null)
             {
-                TryCleanupPartialFiles(target, deleteDiskFiles);
+                try
+                {
+                    await runner.ExecutionTask.ConfigureAwait(false);
+                }
+                catch
+                {
+                }
             }
 
-            StateRepository.Save(_state);
+            if (target != null)
+            {
+                await TryCleanupPartialFilesWithRetryAsync(target, deleteDiskFiles).ConfigureAwait(false);
+            }
+
+            PumpRunningQueues();
+        }
+
+        public async void RedownloadFromBeginning(string id)
+        {
+            DownloadItem item = null;
+            DownloadTaskRunner runner = null;
+
+            lock (_lock)
+            {
+                item = FindByIdLocked(id);
+                if (item == null) return;
+                if (_runners.TryGetValue(id, out runner))
+                {
+                    runner.RequestCancelForRemoval();
+                    _runners.Remove(id);
+                }
+            }
+
+            if (runner != null && runner.ExecutionTask != null)
+            {
+                try { await runner.ExecutionTask.ConfigureAwait(false); } catch { }
+            }
+
+            await TryCleanupPartialFilesWithRetryAsync(item, true).ConfigureAwait(false);
+
+            lock (item.SyncRoot)
+            {
+                item.DownloadedBytes = 0;
+                item.Segments.Clear();
+                item.ErrorMessage = null;
+                item.ComputedSha256 = null;
+                item.RetryCount = 0;
+                item.NextRetryUtc = null;
+                item.CompletedUtc = null;
+                item.Status = DownloadStatus.Queued;
+            }
+
+            SaveStateSafe();
+            StartDownload(item.Id);
+        }
+
+        public async Task<bool> RefreshDownloadAddressAsync(
+            string id,
+            string newUrl,
+            string referer,
+            string cookies,
+            string userAgent,
+            bool resumeNow)
+        {
+            if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(newUrl))
+            {
+                return false;
+            }
+
+            DownloadItem item = null;
+            DownloadTaskRunner runner = null;
+
+            lock (_lock)
+            {
+                item = FindByIdLocked(id);
+                if (item == null) return false;
+                if (_runners.TryGetValue(id, out runner))
+                {
+                    runner.RequestPause();
+                }
+            }
+
+            if (runner != null && runner.ExecutionTask != null)
+            {
+                try { await runner.ExecutionTask.ConfigureAwait(false); } catch { }
+            }
+
+            lock (item.SyncRoot)
+            {
+                item.Url = newUrl.Trim();
+                if (!string.IsNullOrWhiteSpace(referer)) item.Referer = referer.Trim();
+                if (!string.IsNullOrWhiteSpace(cookies)) item.Cookies = cookies.Trim();
+                if (!string.IsNullOrWhiteSpace(userAgent)) item.UserAgent = userAgent.Trim();
+                item.ErrorMessage = null;
+                item.RetryCount = 0;
+                item.NextRetryUtc = null;
+            }
+
+            // Update URL inside .mhsmeta so checkpoint matches the refreshed signed URL
+            try
+            {
+                if (File.Exists(item.MetaFilePath))
+                {
+                    JavaScriptSerializer ser = new JavaScriptSerializer();
+                    PartMetadata meta = ser.Deserialize<PartMetadata>(File.ReadAllText(item.MetaFilePath));
+                    if (meta != null)
+                    {
+                        meta.Url = item.Url;
+                        File.WriteAllText(item.MetaFilePath, ser.Serialize(meta), StateRepository.Utf8NoBom);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            item.AddLog("Refreshed download address -> " + item.Url);
+            SaveStateSafe();
             RaiseStateUpdated();
+
+            if (resumeNow && item.Status != DownloadStatus.Completed)
+            {
+                StartDownload(item.Id);
+            }
+            return true;
         }
 
         public int ClearCompleted()
@@ -338,40 +644,72 @@ namespace MHSManager
             }
             if (removed > 0)
             {
-                StateRepository.Save(_state);
+                SaveStateSafe();
                 RaiseStateUpdated();
             }
             return removed;
         }
 
-        private static void TryCleanupPartialFiles(DownloadItem item, bool deleteFinalFile)
+        private static async Task TryCleanupPartialFilesWithRetryAsync(DownloadItem item, bool deleteFinalFile)
         {
-            try
+            for (int attempt = 0; attempt < 5; attempt++)
             {
-                if (File.Exists(item.PartFilePath)) File.Delete(item.PartFilePath);
-            }
-            catch { }
+                bool allClean = true;
 
-            try
-            {
-                if (File.Exists(item.MetaFilePath)) File.Delete(item.MetaFilePath);
-            }
-            catch { }
-
-            try
-            {
-                string hlsDir = item.PartFilePath + ".hls";
-                if (Directory.Exists(hlsDir)) Directory.Delete(hlsDir, true);
-            }
-            catch { }
-
-            if (deleteFinalFile)
-            {
                 try
                 {
-                    if (File.Exists(item.FullTargetPath)) File.Delete(item.FullTargetPath);
+                    if (File.Exists(item.PartFilePath)) File.Delete(item.PartFilePath);
                 }
-                catch { }
+                catch
+                {
+                    allClean = false;
+                }
+
+                try
+                {
+                    if (File.Exists(item.MetaFilePath)) File.Delete(item.MetaFilePath);
+                }
+                catch
+                {
+                    allClean = false;
+                }
+
+                try
+                {
+                    if (File.Exists(item.MetaFilePath + ".tmp")) File.Delete(item.MetaFilePath + ".tmp");
+                }
+                catch
+                {
+                }
+
+                try
+                {
+                    string hlsDir = item.PartFilePath + ".hls";
+                    if (Directory.Exists(hlsDir)) Directory.Delete(hlsDir, true);
+                }
+                catch
+                {
+                    allClean = false;
+                }
+
+                if (deleteFinalFile)
+                {
+                    try
+                    {
+                        if (File.Exists(item.FullTargetPath)) File.Delete(item.FullTargetPath);
+                    }
+                    catch
+                    {
+                        allClean = false;
+                    }
+                }
+
+                if (allClean)
+                {
+                    return;
+                }
+
+                await Task.Delay(50 * (attempt + 1)).ConfigureAwait(false);
             }
         }
 
@@ -390,11 +728,14 @@ namespace MHSManager
                             (d.Status == DownloadStatus.Paused || d.Status == DownloadStatus.Error))
                         {
                             d.Status = DownloadStatus.Queued;
+                            d.RetryCount = 0;
+                            d.NextRetryUtc = null;
                         }
                     }
                     _dirty = true;
                 }
             }
+            SaveStateSafe();
             PumpRunningQueues();
             RaiseStateUpdated();
         }
@@ -415,6 +756,15 @@ namespace MHSManager
                             toPause.Add(kvp.Value);
                         }
                     }
+                    for (int i = 0; i < _state.Downloads.Count; i++)
+                    {
+                        DownloadItem d = _state.Downloads[i];
+                        if (string.Equals(d.QueueName, q.Name, StringComparison.OrdinalIgnoreCase) &&
+                            d.NextRetryUtc.HasValue)
+                        {
+                            d.NextRetryUtc = null;
+                        }
+                    }
                     _dirty = true;
                 }
             }
@@ -423,6 +773,7 @@ namespace MHSManager
             {
                 toPause[i].RequestPause();
             }
+            SaveStateSafe();
             RaiseStateUpdated();
         }
 
@@ -430,7 +781,7 @@ namespace MHSManager
         {
             lock (_lock)
             {
-                DownloadItem item = FindById(id);
+                DownloadItem item = FindByIdLocked(id);
                 if (item != null)
                 {
                     item.MaxSpeedBytesPerSec = Math.Max(0, maxBytesPerSec);
@@ -442,7 +793,7 @@ namespace MHSManager
                     runner.UpdateItemSpeedLimit(maxBytesPerSec);
                 }
             }
-            StateRepository.Save(_state);
+            SaveStateSafe();
             RaiseStateUpdated();
         }
 
@@ -451,9 +802,22 @@ namespace MHSManager
             _globalLimiter.Configure(
                 _state.Settings.EnableGlobalSpeedLimit,
                 _state.Settings.GlobalSpeedLimitBytesPerSec);
-            StateRepository.Save(_state);
+            SaveStateSafe();
             PumpRunningQueues();
             RaiseStateUpdated();
+        }
+
+        private DownloadItem FindByIdLocked(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            for (int i = 0; i < _state.Downloads.Count; i++)
+            {
+                if (string.Equals(_state.Downloads[i].Id, id, StringComparison.OrdinalIgnoreCase))
+                {
+                    return _state.Downloads[i];
+                }
+            }
+            return null;
         }
 
         private QueueDefinition FindQueueLocked(string name)
@@ -520,18 +884,76 @@ namespace MHSManager
 
         private void OnRunnerFinished(DownloadItem item)
         {
+            bool stillOwned = false;
             bool completedNow = false;
+            QueueDefinition finishedQueuePost = null;
+
             lock (_lock)
             {
                 _runners.Remove(item.Id);
                 _lastSampleBytes.Remove(item.Id);
                 item.CurrentSpeedBytesPerSec = 0;
+
+                stillOwned = (FindByIdLocked(item.Id) != null);
+                if (!stillOwned)
+                {
+                    return;
+                }
+
                 completedNow = (item.Status == DownloadStatus.Completed);
+
+                if (item.Status == DownloadStatus.Error)
+                {
+                    QueueDefinition q = FindQueueLocked(item.QueueName);
+                    if (q != null && q.IsRunning && item.RetryCount < q.MaxRetriesPerItem)
+                    {
+                        item.RetryCount++;
+                        int delaySec = q.RetryDelaySeconds > 0 ? q.RetryDelaySeconds : 30;
+                        item.NextRetryUtc = DateTime.UtcNow.AddSeconds(delaySec);
+                        item.AddLog(string.Format(
+                            "Scheduler: Retry {0}/{1} scheduled in {2}s...",
+                            item.RetryCount,
+                            q.MaxRetriesPerItem,
+                            delaySec));
+                    }
+                }
+
                 _dirty = true;
             }
 
-            StateRepository.Save(_state);
+            SaveStateSafe();
             PumpRunningQueues();
+
+            if (completedNow)
+            {
+                lock (_lock)
+                {
+                    QueueDefinition q = FindQueueLocked(item.QueueName);
+                    if (q != null && q.IsRunning && q.PostCompletionAction != QueuePostAction.None)
+                    {
+                        bool anyRemainingInQueue = false;
+                        for (int i = 0; i < _state.Downloads.Count; i++)
+                        {
+                            DownloadItem d = _state.Downloads[i];
+                            if (!string.Equals(d.QueueName, q.Name, StringComparison.OrdinalIgnoreCase)) continue;
+                            if (d.Status == DownloadStatus.Queued ||
+                                d.Status == DownloadStatus.Probing ||
+                                d.Status == DownloadStatus.Downloading ||
+                                d.Status == DownloadStatus.Merging ||
+                                (d.Status == DownloadStatus.Error && d.NextRetryUtc.HasValue))
+                            {
+                                anyRemainingInQueue = true;
+                                break;
+                            }
+                        }
+                        if (!anyRemainingInQueue)
+                        {
+                            finishedQueuePost = q;
+                        }
+                    }
+                }
+            }
+
             RaiseStateUpdated();
 
             if (completedNow)
@@ -540,6 +962,10 @@ namespace MHSManager
                 if (DownloadCompleted != null)
                 {
                     DownloadCompleted(item);
+                }
+                if (finishedQueuePost != null && QueuePostActionTriggered != null)
+                {
+                    QueuePostActionTriggered(finishedQueuePost);
                 }
             }
         }
@@ -573,6 +999,8 @@ namespace MHSManager
 
             double aggregateBps = 0;
             bool hadActive = false;
+            bool wokeRetry = false;
+            DateTime utcNow = DateTime.UtcNow;
 
             lock (_lock)
             {
@@ -596,9 +1024,30 @@ namespace MHSManager
 
                     aggregateBps += item.CurrentSpeedBytesPerSec;
                 }
+
+                for (int i = 0; i < _state.Downloads.Count; i++)
+                {
+                    DownloadItem d = _state.Downloads[i];
+                    if (d.Status == DownloadStatus.Error && d.NextRetryUtc.HasValue && utcNow >= d.NextRetryUtc.Value)
+                    {
+                        QueueDefinition q = FindQueueLocked(d.QueueName);
+                        if (q != null && q.IsRunning)
+                        {
+                            d.NextRetryUtc = null;
+                            d.Status = DownloadStatus.Queued;
+                            wokeRetry = true;
+                            _dirty = true;
+                        }
+                    }
+                }
             }
 
             _totalSpeedBps = hadActive ? aggregateBps : 0.0;
+
+            if (wokeRetry)
+            {
+                PumpRunningQueues();
+            }
 
             CheckQueueSchedules();
 
@@ -606,10 +1055,10 @@ namespace MHSManager
             if (_dirty && (tick % 5 == 0))
             {
                 _dirty = false;
-                StateRepository.Save(_state);
+                SaveStateSafe();
             }
 
-            if (hadActive)
+            if (hadActive || wokeRetry)
             {
                 RaiseStateUpdated();
             }
@@ -622,6 +1071,10 @@ namespace MHSManager
             if (minuteKey == _lastScheduleMinuteKey) return;
             _lastScheduleMinuteKey = minuteKey;
 
+            string todayKey = now.ToString("yyyyMMdd");
+            int dayBit = 1 << (int)now.DayOfWeek;
+            int nowMinutes = now.Hour * 60 + now.Minute;
+
             List<string> toStart = new List<string>();
             List<string> toStop = new List<string>();
 
@@ -630,13 +1083,43 @@ namespace MHSManager
                 for (int i = 0; i < _state.Settings.Queues.Count; i++)
                 {
                     QueueDefinition q = _state.Settings.Queues[i];
-                    if (q.EnableScheduleStart && q.StartHour == now.Hour && q.StartMinute == now.Minute && !q.IsRunning)
+                    int mask = q.DaysOfWeekMask > 0 ? q.DaysOfWeekMask : 127;
+                    if ((mask & dayBit) == 0)
                     {
-                        toStart.Add(q.Name);
+                        continue;
                     }
-                    if (q.EnableScheduleStop && q.StopHour == now.Hour && q.StopMinute == now.Minute && q.IsRunning)
+
+                    int startMin = q.StartHour * 60 + q.StartMinute;
+                    int stopMin = q.StopHour * 60 + q.StopMinute;
+
+                    if (q.EnableScheduleStart && q.LastAutoStartDayKey != todayKey)
                     {
-                        toStop.Add(q.Name);
+                        bool inStartWindow = nowMinutes >= startMin &&
+                            (!q.EnableScheduleStop || stopMin <= startMin || nowMinutes < stopMin);
+                        if (inStartWindow)
+                        {
+                            q.LastAutoStartDayKey = todayKey;
+                            if (!q.IsRunning)
+                            {
+                                toStart.Add(q.Name);
+                            }
+                            _dirty = true;
+                        }
+                    }
+
+                    if (q.EnableScheduleStop && q.LastAutoStopDayKey != todayKey)
+                    {
+                        bool reachedStop = nowMinutes >= stopMin &&
+                            (!q.EnableScheduleStart || stopMin >= startMin || nowMinutes < startMin);
+                        if (reachedStop)
+                        {
+                            q.LastAutoStopDayKey = todayKey;
+                            if (q.IsRunning)
+                            {
+                                toStop.Add(q.Name);
+                            }
+                            _dirty = true;
+                        }
                     }
                 }
             }
@@ -663,4 +1146,3 @@ namespace MHSManager
         }
     }
 }
-
