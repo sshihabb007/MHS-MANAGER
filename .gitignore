@@ -1,0 +1,18 @@
+# Compiled executables and debug symbols (build via .\build.ps1)
+bin/
+obj/
+*.exe
+*.dll
+*.pdb
+
+# Temporary partial download & metadata files
+*.mhspart
+*.mhsmeta
+*.hls/
+
+# OS & Editor files
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

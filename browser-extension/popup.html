@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MHS Manager</title>
+  <style>
+    body {
+      margin: 0;
+      width: 320px;
+      padding: 14px;
+      background: #0f172a;
+      color: #f8fafc;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      font-size: 13px;
+    }
+    .hdr {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .title {
+      font-weight: 700;
+      font-size: 15px;
+      color: #38bdf8;
+    }
+    .badge {
+      padding: 3px 8px;
+      border-radius: 99px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #334155;
+    }
+    .badge.ok { background: rgba(16, 185, 129, 0.2); color: #34d399; }
+    .badge.off { background: rgba(239, 68, 68, 0.2); color: #f87171; }
+    .card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    input[type="text"] {
+      width: 100%;
+      box-sizing: border-box;
+      background: #0f172a;
+      border: 1px solid #475569;
+      color: #f8fafc;
+      border-radius: 6px;
+      padding: 7px 9px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    button {
+      width: 100%;
+      padding: 8px 10px;
+      border: none;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      color: #fff;
+      background: #0ea5e9;
+      margin-bottom: 6px;
+    }
+    button.secondary {
+      background: #334155;
+    }
+    .stats {
+      font-size: 12px;
+      color: #94a3b8;
+      margin-top: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="hdr">
+    <div class="title">MHS Manager</div>
+    <span id="statusBadge" class="badge">Checking...</span>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <span>Auto-capture downloads</span>
+      <input type="checkbox" id="chkAuto" checked />
+    </div>
+    <div id="statsLine" class="stats">Desktop RPC: 127.0.0.1:16888</div>
+  </div>
+
+  <div class="card">
+    <input type="text" id="txtQuickUrl" placeholder="Paste HTTP/HTTPS or .m3u8 URL..." />
+    <button id="btnSendUrl">Download URL with MHS</button>
+    <button id="btnGrabAll" class="secondary">Queue All Links on This Page</button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
+

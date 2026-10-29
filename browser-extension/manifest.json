@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "MHS Manager Integration Module",
+  "short_name": "MHS Manager",
+  "version": "1.0.0",
+  "description": "Clean-room open-source browser integration for MHS Manager: multi-connection download takeover, context menus, and HTML5/HLS video stream button.",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "cookies",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:16888/*",
+    "<all_urls>"
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_title": "MHS Manager",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}
+
