@@ -4,6 +4,8 @@
 
 It compiles directly on any standard Windows 10/11 machine with **zero external NuGet dependencies** into a standalone, unprivileged (`asInvoker`), Per-Monitor DPI-aware executable (`bin\MHSManager.exe`).
 
+Prebuilt `MHSManager.exe` and `MHS-Manager-Portable-x64.zip` bundles are built automatically via GitHub Actions and published under [**GitHub Releases**](https://github.com/sshihabb007/MHS-MANAGER/releases).
+
 ---
 
 ## Key Features

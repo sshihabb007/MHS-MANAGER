@@ -1,6 +1,7 @@
 # Compiled executables and debug symbols (build via .\build.ps1)
 bin/
 obj/
+release-dist/
 *.exe
 *.dll
 *.pdb
@@ -16,3 +17,4 @@ obj/
 .idea/
 Thumbs.db
 .DS_Store
+
