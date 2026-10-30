@@ -2,14 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Media;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
 namespace ShihabMehediIDM
 {
     public class ShihabMainIdmWindow : Form
     {
+        [DllImport("user32.dll", EntryPoint = "SendMessageW", CharSet = CharSet.Unicode)]
+        private static extern IntPtr SendMehediCueBannerMessage(IntPtr shihabHwnd, int mehediMsg, IntPtr shihabWParam, string mehediLParam);
+
         private readonly ShihabStateStore _shihabStore;
         private readonly MehediAppConfiguration _mehediConfig;
         private readonly MehediDynamicSegmentEngine _shihabEngine;
@@ -17,17 +22,19 @@ namespace ShihabMehediIDM
         private readonly ShihabCliParsedArguments _shihabStartupCli;
         private readonly Dictionary<string, ShihabDownloadProgressForm> _mehediOpenProgressForms;
 
+        private Panel _shihabTopHeaderRow;
         private MenuStrip _shihabMenuBar;
         private ToolStrip _mehediToolBar;
-        private Panel _shihabSearchBarPanel;
+        private ShihabRoundedCardPanel _shihabSearchBarPanel;
         private TextBox _mehediSearchBox;
+        private Button _shihabClearSearchBtn;
         private Panel _mehediBodyPaddingHost;
         private SplitContainer _shihabSplitContainer;
-        private Panel _shihabCategoryFramePanel;
+        private ShihabRoundedCardPanel _shihabCategoryFramePanel;
         private Panel _mehediCategoryHeaderStrip;
         private Label _shihabCategoryHeaderTitle;
         private Button _mehediCloseCategoriesBtn;
-        private Panel _shihabListFramePanel;
+        private ShihabRoundedCardPanel _shihabListFramePanel;
         private MehediModernTreeView _mehediCategoryTree;
         private ShihabModernListView _shihabDownloadsListView;
         private ToolStripButton _mehediResumeToolBtn;
@@ -64,9 +71,9 @@ namespace ShihabMehediIDM
             _shihabStartupCli = shihabStartupCli;
             _mehediOpenProgressForms = new Dictionary<string, ShihabDownloadProgressForm>();
 
-            Text = "MHS Download Manager 1.0.0";
-            Size = new Size(1060, 650);
-            MinimumSize = new Size(860, 500);
+            Text = ShihabThemePalette.ShihabMainHeaderTitle;
+            Size = new Size(1090, 670);
+            MinimumSize = new Size(900, 520);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
             Icon = ShihabThemePalette.CreateShihabAppIcon();
@@ -107,11 +114,11 @@ namespace ShihabMehediIDM
             {
                 if (mehediE.Control && mehediE.KeyCode == Keys.F)
                 {
-                    _shihabSearchBarPanel.Visible = !_shihabSearchBarPanel.Visible;
-                    if (_shihabSearchBarPanel.Visible) _mehediSearchBox.Focus();
+                    _mehediSearchBox.Focus();
+                    _mehediSearchBox.SelectAll();
                     mehediE.Handled = true;
                 }
-                else if (mehediE.KeyCode == Keys.Delete)
+                else if (mehediE.KeyCode == Keys.Delete && !_mehediSearchBox.Focused)
                 {
                     DeleteSelectedShihabDownloads(false);
                 }
@@ -166,8 +173,8 @@ namespace ShihabMehediIDM
             mehediDownloadsMenu.DropDownItems.Add(new ToolStripSeparator());
             mehediDownloadsMenu.DropDownItems.Add("Find (Ctrl+F)", null, delegate
             {
-                _shihabSearchBarPanel.Visible = !_shihabSearchBarPanel.Visible;
-                if (_shihabSearchBarPanel.Visible) _mehediSearchBox.Focus();
+                _mehediSearchBox.Focus();
+                _mehediSearchBox.SelectAll();
             });
             mehediDownloadsMenu.DropDownItems.Add("Scheduler and queues...", null, delegate { OpenMehediSchedulerDialog(); });
             mehediDownloadsMenu.DropDownItems.Add("Start Main Queue", null, delegate { _shihabEngine.StartShihabQueue("Main Download Queue"); });
@@ -228,84 +235,162 @@ namespace ShihabMehediIDM
             ToolStripMenuItem shihabTopAboutMenu = new ToolStripMenuItem("&About");
             shihabTopAboutMenu.Click += delegate { ShowShihabAboutDialog(); };
 
-            _shihabMenuBar.Padding = new Padding(4, 2, 4, 2);
+            _shihabMenuBar.Dock = DockStyle.Fill;
+            _shihabMenuBar.Padding = new Padding(4, 5, 4, 4);
             _shihabMenuBar.Items.AddRange(new ToolStripItem[]
             {
                 mehediTasksMenu, shihabFileMenu, mehediDownloadsMenu, shihabViewMenu, mehediHelpMenu, shihabTopAboutMenu
             });
 
-            // MHS Download Manager 1.0.0 Large Outlined Pastel-Neon Toolbar
+            // AB-Style Top Header Row: Left MenuStrip + Right Rounded Pill "Search in the List"
+            _shihabSearchBarPanel = new ShihabRoundedCardPanel
+            {
+                Dock = DockStyle.Right,
+                Width = 252,
+                MehediCornerRadius = 14,
+                Padding = new Padding(30, 5, 26, 4)
+            };
+            _shihabSearchBarPanel.Paint += delegate(object shihabSender, PaintEventArgs mehediPaintArgs)
+            {
+                Graphics shihabG = mehediPaintArgs.Graphics;
+                shihabG.SmoothingMode = SmoothingMode.AntiAlias;
+                Color mehediLensCol = _mehediConfig.ShihabDarkMode ? Color.FromArgb(132, 140, 166) : Color.FromArgb(100, 116, 139);
+                using (Pen shihabLensPen = new Pen(mehediLensCol, 1.5f))
+                {
+                    shihabLensPen.StartCap = LineCap.Round;
+                    shihabLensPen.EndCap = LineCap.Round;
+                    int mehediCy = _shihabSearchBarPanel.Height / 2;
+                    shihabG.DrawEllipse(shihabLensPen, 10, mehediCy - 6, 9, 9);
+                    shihabG.DrawLine(shihabLensPen, 18, mehediCy + 2, 22, mehediCy + 6);
+                }
+            };
+
+            _mehediSearchBox = new TextBox
+            {
+                Location = new Point(30, 6),
+                Width = 192,
+                BorderStyle = BorderStyle.None,
+                Font = new Font("Segoe UI", 9f)
+            };
+            Action shihabApplySearchCue = delegate
+            {
+                try
+                {
+                    if (_mehediSearchBox.IsHandleCreated)
+                    {
+                        SendMehediCueBannerMessage(_mehediSearchBox.Handle, 0x1501, (IntPtr)1, "Search in the List");
+                    }
+                }
+                catch { }
+            };
+            _mehediSearchBox.HandleCreated += delegate { shihabApplySearchCue(); };
+
+            _shihabClearSearchBtn = new Button
+            {
+                Text = "\u00D7",
+                Location = new Point(224, 4),
+                Size = new Size(22, 20),
+                FlatStyle = FlatStyle.Flat,
+                Visible = false,
+                Cursor = Cursors.Hand
+            };
+            _shihabClearSearchBtn.FlatAppearance.BorderSize = 0;
+            _shihabClearSearchBtn.Click += delegate
+            {
+                _mehediSearchBox.Text = "";
+                _mehediSearchBox.Focus();
+            };
+            _mehediSearchBox.TextChanged += delegate
+            {
+                _shihabClearSearchBtn.Visible = !string.IsNullOrEmpty(_mehediSearchBox.Text);
+                RefreshMehediDownloadsGrid();
+            };
+            _shihabSearchBarPanel.Controls.Add(_mehediSearchBox);
+            _shihabSearchBarPanel.Controls.Add(_shihabClearSearchBtn);
+
+            _shihabTopHeaderRow = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 38,
+                Padding = new Padding(6, 5, 10, 4)
+            };
+            _shihabTopHeaderRow.Controls.Add(_shihabMenuBar);
+            _shihabTopHeaderRow.Controls.Add(_shihabSearchBarPanel);
+
+            // AB-Style Sleek Dark Obsidian Toolbar
             _mehediToolBar = new ToolStrip
             {
                 GripStyle = ToolStripGripStyle.Hidden,
                 AutoSize = false,
-                Height = 76,
-                ImageScalingSize = new Size(36, 36),
-                Padding = new Padding(8, 4, 8, 4)
+                Height = 58,
+                ImageScalingSize = new Size(28, 28),
+                Padding = new Padding(8, 3, 8, 3)
             };
 
-            AddMehediToolbarBtn("Add URL", "add", true, "Add new download address manually", delegate { PromptAndAddNewShihabUrl(""); });
+            ToolStripButton shihabAddPillBtn = AddMehediToolbarBtn("Add URL", "add", true, "Add new download address manually (Ctrl+N)", delegate { PromptAndAddNewShihabUrl(""); });
+            shihabAddPillBtn.DisplayStyle = ToolStripItemDisplayStyle.None;
+            shihabAddPillBtn.Size = new Size(134, 50);
+            shihabAddPillBtn.Margin = new Padding(2, 1, 6, 1);
+
+            _mehediToolBar.Items.Add(new ToolStripSeparator());
+            AddShihabQueueSplitBtn("Start Queue", "startq", "Start Download Queue", true);
+            AddShihabQueueSplitBtn("Stop Queue", "stopq", "Stop Download Queue", false);
             _mehediResumeToolBtn = AddMehediToolbarBtn("Resume", "resume", false, "Start/Resume selected download(s)", delegate { ResumeSelectedShihabDownloads(); });
             _shihabStopToolBtn = AddMehediToolbarBtn("Stop", "stop", false, "Stop/Pause selected download(s)", delegate { PauseSelectedMehediDownloads(); });
             _mehediStopAllToolBtn = AddMehediToolbarBtn("Stop All", "stopall", false, "Stop all active downloads", delegate { _shihabEngine.StopAllMehediDownloads(); });
+
+            _mehediToolBar.Items.Add(new ToolStripSeparator());
             _shihabDeleteToolBtn = AddMehediToolbarBtn("Delete", "delete", false, "Remove selected download(s)", delegate { DeleteSelectedShihabDownloads(false); });
-            AddMehediToolbarBtn("Delete Co...", "clean", true, "Remove all completed files from list", delegate { DeleteAllCompletedMehediDownloads(); });
-            AddMehediToolbarBtn("Options", "options", true, "Browser integration, File types, Connections, Proxy", delegate { OpenShihabOptionsDialog(); });
+            ToolStripButton mehediCleanBtn = AddMehediToolbarBtn("Delete Done", "clean", true, "Remove all completed files from list", delegate { DeleteAllCompletedMehediDownloads(); });
+            mehediCleanBtn.Size = new Size(78, 50);
+
+            _mehediToolBar.Items.Add(new ToolStripSeparator());
             AddMehediToolbarBtn("Scheduler", "scheduler", true, "Scheduler and download queues", delegate { OpenMehediSchedulerDialog(); });
-            AddShihabQueueSplitBtn("Start Qu...", "startq", "Start Download Queue", true);
-            AddShihabQueueSplitBtn("Stop Qu...", "stopq", "Stop Download Queue", false);
             AddMehediToolbarBtn("Grabber", "grabber", true, "Run MHS Site Grabber", delegate { OpenShihabSiteGrabberDialog(); });
+            AddMehediToolbarBtn("Options", "options", true, "Browser integration, File types, Connections, Proxy", delegate { OpenShihabOptionsDialog(); });
 
-            // Search Bar (Ctrl+F)
-            _shihabSearchBarPanel = new Panel { Dock = DockStyle.Top, Height = 34, Visible = false };
-            Label shihabFindLbl = new Label { Text = "Find (Name / URL / Desc):", Location = new Point(12, 8), AutoSize = true };
-            _mehediSearchBox = new TextBox { Location = new Point(178, 5), Width = 340, BorderStyle = BorderStyle.FixedSingle };
-            _mehediSearchBox.TextChanged += delegate { RefreshMehediDownloadsGrid(); };
-            Button shihabCloseFindBtn = new Button { Text = "×", Location = new Point(526, 4), Size = new Size(28, 24), FlatStyle = FlatStyle.Flat };
-            shihabCloseFindBtn.Click += delegate { _mehediSearchBox.Text = ""; _shihabSearchBarPanel.Visible = false; };
-            _shihabSearchBarPanel.Controls.AddRange(new Control[] { shihabFindLbl, _mehediSearchBox, shihabCloseFindBtn });
-
-            // Framed Body Container (Categories Left Card | Downloads Right Card)
+            // Framed Body Container (Rounded Categories Card Left | Rounded Downloads Table Card Right)
             _mehediBodyPaddingHost = new Panel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(5, 5, 5, 4)
+                Padding = new Padding(8, 6, 8, 6)
             };
 
             _shihabSplitContainer = new SplitContainer
             {
                 Dock = DockStyle.Fill,
-                Size = new Size(1040, 520),
-                SplitterWidth = 5,
-                SplitterDistance = 190,
+                Size = new Size(1060, 520),
+                SplitterWidth = 8,
+                SplitterDistance = 200,
                 Panel1Collapsed = !_mehediConfig.MehediShowCategoriesPanel
             };
 
-            _shihabCategoryFramePanel = new Panel
+            _shihabCategoryFramePanel = new ShihabRoundedCardPanel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(1)
+                MehediCornerRadius = 10,
+                Padding = new Padding(6, 6, 6, 6)
             };
 
             _mehediCategoryHeaderStrip = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 23
+                Height = 24
             };
             _shihabCategoryHeaderTitle = new Label
             {
                 Text = "Categories",
-                Location = new Point(5, 3),
+                Location = new Point(6, 3),
                 AutoSize = true,
-                Font = new Font("Segoe UI", 8.8f, FontStyle.Regular)
+                Font = new Font("Segoe UI Semibold", 8.5f, FontStyle.Regular)
             };
             _mehediCloseCategoriesBtn = new Button
             {
-                Text = "✕",
+                Text = "\u2715",
                 Dock = DockStyle.Right,
                 Width = 24,
                 FlatStyle = FlatStyle.Flat,
-                Font = new Font("Segoe UI", 7.8f, FontStyle.Regular),
+                Font = new Font("Segoe UI", 7.6f, FontStyle.Regular),
                 Cursor = Cursors.Hand
             };
             _mehediCloseCategoriesBtn.FlatAppearance.BorderSize = 0;
@@ -346,10 +431,11 @@ namespace ShihabMehediIDM
             _shihabCategoryFramePanel.Controls.Add(_mehediCategoryHeaderStrip);
             _shihabSplitContainer.Panel1.Controls.Add(_shihabCategoryFramePanel);
 
-            _shihabListFramePanel = new Panel
+            _shihabListFramePanel = new ShihabRoundedCardPanel
             {
                 Dock = DockStyle.Fill,
-                Padding = new Padding(1)
+                MehediCornerRadius = 10,
+                Padding = new Padding(2, 2, 2, 2)
             };
 
             _shihabDownloadsListView = new ShihabModernListView
@@ -357,17 +443,18 @@ namespace ShihabMehediIDM
                 Dock = DockStyle.Fill,
                 MultiSelect = true,
                 AllowDrop = true,
+                ShihabSpaciousRows = true,
                 MehediSortedColumnIndex = 6,
                 ShihabSortAscending = false
             };
-            _shihabDownloadsListView.Columns.Add("File Name", 265);
-            _shihabDownloadsListView.Columns.Add("Q", 32);
-            _shihabDownloadsListView.Columns.Add("Size", 88);
-            _shihabDownloadsListView.Columns.Add("Status", 108);
-            _shihabDownloadsListView.Columns.Add("Time left", 92);
-            _shihabDownloadsListView.Columns.Add("Transfer rate", 105);
-            _shihabDownloadsListView.Columns.Add("Last Try Date", 112);
-            _shihabDownloadsListView.Columns.Add("Description", 195);
+            _shihabDownloadsListView.Columns.Add("Name", 275);
+            _shihabDownloadsListView.Columns.Add("Q", 34);
+            _shihabDownloadsListView.Columns.Add("Size", 90);
+            _shihabDownloadsListView.Columns.Add("Status", 132);
+            _shihabDownloadsListView.Columns.Add("Time Left", 94);
+            _shihabDownloadsListView.Columns.Add("Speed", 98);
+            _shihabDownloadsListView.Columns.Add("Date Added", 124);
+            _shihabDownloadsListView.Columns.Add("Description", 185);
 
             _shihabDownloadsListView.SelectedIndexChanged += delegate { UpdateMehediToolbarActionIcons(); };
             _shihabDownloadsListView.ColumnClick += delegate(object shihabS, ColumnClickEventArgs mehediE)
@@ -438,16 +525,15 @@ namespace ShihabMehediIDM
             _mehediTrayIcon = new NotifyIcon
             {
                 Icon = Icon,
-                Text = "MHS Download Manager 1.0.0 (mdm.exe)",
+                Text = ShihabThemePalette.ShihabMainHeaderTitle,
                 Visible = true,
                 ContextMenuStrip = _shihabTrayMenuRef
             };
             _mehediTrayIcon.DoubleClick += delegate { Show(); ShowInTaskbar = true; WindowState = FormWindowState.Normal; Activate(); };
 
             Controls.Add(_mehediBodyPaddingHost);
-            Controls.Add(_shihabSearchBarPanel);
             Controls.Add(_mehediToolBar);
-            Controls.Add(_shihabMenuBar);
+            Controls.Add(_shihabTopHeaderRow);
             Controls.Add(_mehediStatusBar);
             MainMenuStrip = _shihabMenuBar;
         }
@@ -461,10 +547,11 @@ namespace ShihabMehediIDM
                 ImageScaling = ToolStripItemImageScaling.None,
                 TextImageRelation = TextImageRelation.ImageAboveText,
                 DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
+                Font = new Font("Segoe UI", 8.2f, FontStyle.Regular),
                 AutoSize = false,
-                Size = new Size(76, 66),
+                Size = new Size(66, 50),
                 ToolTipText = mehediTooltip,
-                Margin = new Padding(2, 1, 2, 1),
+                Margin = new Padding(1, 1, 1, 1),
                 Tag = mehediGlyph
             };
             mehediBtn.Click += shihabHandler;
@@ -481,10 +568,11 @@ namespace ShihabMehediIDM
                 ImageScaling = ToolStripItemImageScaling.None,
                 TextImageRelation = TextImageRelation.ImageAboveText,
                 DisplayStyle = ToolStripItemDisplayStyle.ImageAndText,
+                Font = new Font("Segoe UI", 8.2f, FontStyle.Regular),
                 AutoSize = false,
-                Size = new Size(86, 66),
+                Size = new Size(84, 50),
                 ToolTipText = mehediTooltip,
-                Margin = new Padding(2, 1, 2, 1)
+                Margin = new Padding(1, 1, 1, 1)
             };
             mehediSplit.ButtonClick += delegate
             {
@@ -600,10 +688,11 @@ namespace ShihabMehediIDM
         {
             bool shihabDark = _mehediConfig.ShihabDarkMode;
             Color mehediWin = ShihabThemePalette.GetMehediWindowBg(shihabDark);
+            Color shihabSideCard = ShihabThemePalette.GetShihabSidebarBg(shihabDark);
             Color shihabSurf = ShihabThemePalette.GetShihabSurfaceBg(shihabDark);
-            Color mehediHead = ShihabThemePalette.GetMehediHeaderBg(shihabDark);
             Color shihabFg = ShihabThemePalette.GetShihabPrimaryText(shihabDark);
-            Color mehediFrameBorder = shihabDark ? Color.FromArgb(108, 108, 112) : Color.FromArgb(185, 195, 208);
+            Color mehediMuted = ShihabThemePalette.GetMehediMutedText(shihabDark);
+            Color shihabCardEdge = shihabDark ? Color.FromArgb(37, 41, 58) : Color.FromArgb(203, 213, 225);
 
             ShihabThemePalette.ApplyMehediNativeDarkFrame(this, shihabDark);
             BackColor = mehediWin;
@@ -612,6 +701,8 @@ namespace ShihabMehediIDM
             MehediDarkToolStripRenderer shihabMenuRenderer = new MehediDarkToolStripRenderer(shihabDark, false);
             MehediDarkToolStripRenderer mehediToolbarRenderer = new MehediDarkToolStripRenderer(shihabDark, true);
 
+            _shihabTopHeaderRow.BackColor = mehediWin;
+            _shihabMenuBar.BackColor = mehediWin;
             _shihabMenuBar.Renderer = shihabMenuRenderer;
             _mehediToolBar.Renderer = mehediToolbarRenderer;
             _mehediStatusBar.Renderer = shihabMenuRenderer;
@@ -624,30 +715,48 @@ namespace ShihabMehediIDM
                 _shihabTrayMenuRef.Renderer = shihabMenuRenderer;
             }
 
+            _shihabSearchBarPanel.BackColor = mehediWin;
+            _shihabSearchBarPanel.MehediFillColor = shihabDark ? Color.FromArgb(25, 28, 39) : Color.White;
+            _shihabSearchBarPanel.ShihabBorderColor = shihabDark ? Color.FromArgb(43, 48, 68) : Color.FromArgb(196, 206, 222);
+            _mehediSearchBox.BackColor = _shihabSearchBarPanel.MehediFillColor;
+            _mehediSearchBox.ForeColor = shihabFg;
+            _shihabClearSearchBtn.BackColor = _shihabSearchBarPanel.MehediFillColor;
+            _shihabClearSearchBtn.ForeColor = mehediMuted;
+            _shihabSearchBarPanel.Invalidate();
+
             _mehediBodyPaddingHost.BackColor = mehediWin;
             _shihabSplitContainer.BackColor = mehediWin;
-            _shihabCategoryFramePanel.BackColor = mehediFrameBorder;
-            _shihabListFramePanel.BackColor = mehediFrameBorder;
+            _shihabSplitContainer.Panel1.BackColor = mehediWin;
+            _shihabSplitContainer.Panel2.BackColor = mehediWin;
 
-            _mehediCategoryHeaderStrip.BackColor = shihabDark ? Color.FromArgb(34, 34, 36) : Color.FromArgb(234, 240, 248);
-            _shihabCategoryHeaderTitle.ForeColor = shihabFg;
-            _mehediCloseCategoriesBtn.BackColor = _mehediCategoryHeaderStrip.BackColor;
-            _mehediCloseCategoriesBtn.ForeColor = shihabFg;
+            _shihabCategoryFramePanel.BackColor = mehediWin;
+            _shihabCategoryFramePanel.MehediFillColor = shihabSideCard;
+            _shihabCategoryFramePanel.ShihabBorderColor = shihabCardEdge;
+            _shihabCategoryFramePanel.Invalidate();
 
-            _shihabSearchBarPanel.BackColor = mehediHead;
-            _mehediSearchBox.BackColor = shihabSurf;
-            _mehediSearchBox.ForeColor = shihabFg;
+            _shihabListFramePanel.BackColor = mehediWin;
+            _shihabListFramePanel.MehediFillColor = mehediWin;
+            _shihabListFramePanel.ShihabBorderColor = shihabCardEdge;
+            _shihabListFramePanel.Invalidate();
+
+            _mehediCategoryHeaderStrip.BackColor = shihabSideCard;
+            _shihabCategoryHeaderTitle.BackColor = shihabSideCard;
+            _shihabCategoryHeaderTitle.ForeColor = mehediMuted;
+            _mehediCloseCategoriesBtn.BackColor = shihabSideCard;
+            _mehediCloseCategoriesBtn.ForeColor = mehediMuted;
 
             _mehediCategoryTree.ShihabDarkMode = shihabDark;
-            _mehediCategoryTree.BackColor = shihabDark ? Color.FromArgb(28, 28, 28) : Color.White;
+            _mehediCategoryTree.BackColor = shihabSideCard;
             _mehediCategoryTree.ForeColor = shihabFg;
             _mehediCategoryTree.Invalidate();
 
             _shihabDownloadsListView.MehediDarkMode = shihabDark;
-            _shihabDownloadsListView.BackColor = shihabSurf;
+            _shihabDownloadsListView.BackColor = shihabDark ? mehediWin : Color.White;
             _shihabDownloadsListView.ForeColor = shihabFg;
             _shihabDownloadsListView.Invalidate();
 
+            ShihabThemePalette.ApplyShihabDarkThemeToControlTree(this, shihabDark);
+            _mehediSearchBox.BackColor = _shihabSearchBarPanel.MehediFillColor;
             UpdateShihabStatusBadges();
         }
 
@@ -803,17 +912,23 @@ namespace ShihabMehediIDM
                     shihabQueueShort = shihabIt.MehediQueueName.StartsWith("Main", StringComparison.OrdinalIgnoreCase) ? "Main" : "Q";
                 }
 
+                bool mehediRowActive = _shihabEngine.IsMehediItemActive(shihabIt.ShihabId);
+
                 mehediRow.SubItems[0].Text = shihabIt.ShihabFileName;
                 mehediRow.SubItems[1].Text = shihabQueueShort;
                 mehediRow.SubItems[2].Text = shihabIt.ShihabTotalBytes >= 0 ? ShihabFormatHelpers.FormatMehediBytes(shihabIt.ShihabTotalBytes) : "";
                 mehediRow.SubItems[3].Text = shihabIt.ShihabStatusText ?? "";
-                mehediRow.SubItems[4].Text = shihabIt.MehediEtaSeconds >= 0 ? ShihabFormatHelpers.FormatMehediTimeLeft(shihabIt.MehediEtaSeconds) : "";
-                mehediRow.SubItems[5].Text = ShihabFormatHelpers.FormatShihabSpeed(shihabIt.ShihabCurrentSpeedBps);
+                mehediRow.SubItems[4].Text = (mehediRowActive && shihabIt.MehediEtaSeconds > 0)
+                    ? ShihabFormatHelpers.FormatMehediTimeLeft(shihabIt.MehediEtaSeconds)
+                    : "";
+                mehediRow.SubItems[5].Text = (mehediRowActive && shihabIt.ShihabCurrentSpeedBps > 1.0)
+                    ? ShihabFormatHelpers.FormatShihabSpeed(shihabIt.ShihabCurrentSpeedBps)
+                    : "";
                 mehediRow.SubItems[6].Text = shihabIt.MehediLastTryDate ?? "";
                 mehediRow.SubItems[7].Text = shihabIt.ShihabDescription ?? "";
                 mehediRow.Selected = shihabSelectedIds.Contains(shihabIt.ShihabId);
 
-                if (_shihabEngine.IsMehediItemActive(shihabIt.ShihabId))
+                if (mehediRowActive)
                 {
                     shihabActiveCount++;
                     mehediAggregateSpeed += shihabIt.ShihabCurrentSpeedBps;
@@ -1508,7 +1623,7 @@ namespace ShihabMehediIDM
                 "• Hold Alt while clicking any link to bypass capture\n" +
                 "• Floating MHS Download corner icon on YouTube, Facebook, Instagram & HTML5 video players\n" +
                 "• Automatic extraction of exact selected-video titles & post captions\n",
-                "MHS Download Manager 1.0.0 — Browser Extension",
+                ShihabThemePalette.ShihabMainHeaderTitle + " — Browser Extension",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }
@@ -1526,7 +1641,7 @@ namespace ShihabMehediIDM
                 "  /q             Exit MHS Download Manager after download finishes\n" +
                 "  /a             Add file to Main Download Queue without starting\n" +
                 "  /s             Start Main Download Queue immediately",
-                "MHS Download Manager — CLI Switches",
+                ShihabThemePalette.ShihabMainHeaderTitle + " — CLI Switches",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }

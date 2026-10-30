@@ -32,7 +32,7 @@ namespace ShihabMehediIDM
             _shihabBridge = shihabBridge;
             bool shihabDark = shihabConfig.ShihabDarkMode;
 
-            Text = "MHS Download Manager Configuration";
+            Text = "Configuration — " + ShihabThemePalette.ShihabMainHeaderTitle;
             Size = new Size(680, 560);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -47,8 +47,9 @@ namespace ShihabMehediIDM
             Color mehediSurf = ShihabThemePalette.GetShihabSurfaceBg(shihabDark);
             Color shihabMuted = ShihabThemePalette.GetMehediMutedText(shihabDark);
 
-            TabControl mehediTabs = new TabControl
+            ShihabDarkTabControl mehediTabs = new ShihabDarkTabControl
             {
+                ShihabDarkMode = shihabDark,
                 Location = new Point(12, 10),
                 Size = new Size(640, 458),
                 Multiline = true
@@ -1311,7 +1312,7 @@ namespace ShihabMehediIDM
             _shihabStore = shihabStore;
             bool mehediDark = shihabConfig.ShihabDarkMode;
 
-            Text = "Scheduler and Queues — MHS Download Manager";
+            Text = "Scheduler and Queues — " + ShihabThemePalette.ShihabMainHeaderTitle;
             Size = new Size(710, 465);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -1354,7 +1355,12 @@ namespace ShihabMehediIDM
                 }
             };
 
-            TabControl shihabRightTabs = new TabControl { Location = new Point(222, 16), Size = new Size(460, 355) };
+            ShihabDarkTabControl shihabRightTabs = new ShihabDarkTabControl
+            {
+                ShihabDarkMode = mehediDark,
+                Location = new Point(222, 16),
+                Size = new Size(460, 355)
+            };
             TabPage mehediSchedTab = new TabPage("Schedule") { BackColor = BackColor, ForeColor = ForeColor };
             TabPage shihabFilesTab = new TabPage("Files in the queue") { BackColor = BackColor, ForeColor = ForeColor };
 
@@ -1522,7 +1528,7 @@ namespace ShihabMehediIDM
         public ShihabBatchDownloadForm(bool shihabDark)
         {
             ShihabGeneratedUrls = new List<string>();
-            Text = "Add Batch Download (Wildcard *) — MHS Download Manager";
+            Text = "Add Batch Download (Wildcard *) — " + ShihabThemePalette.ShihabMainHeaderTitle;
             Size = new Size(620, 360);
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -1680,7 +1686,7 @@ namespace ShihabMehediIDM
         public MehediDownloadAllLinksForm(ShihabBatchCaptureDto shihabBatch, bool mehediDark)
         {
             ShihabChosenLinks = new List<MehediBatchLinkEntryDto>();
-            Text = "Download All Links — MHS Download Manager";
+            Text = "Download All Links — " + ShihabThemePalette.ShihabMainHeaderTitle;
             Size = new Size(760, 490);
             StartPosition = FormStartPosition.CenterScreen;
             TopMost = true;
@@ -1818,7 +1824,7 @@ namespace ShihabMehediIDM
         public ShihabSiteGrabberForm(bool shihabDark)
         {
             ShihabSelectedGrabbedUrls = new List<string>();
-            Text = "MHS Download Manager Site Grabber";
+            Text = "Site Grabber — " + ShihabThemePalette.ShihabMainHeaderTitle;
             Size = new Size(760, 500);
             StartPosition = FormStartPosition.CenterParent;
             BackColor = ShihabThemePalette.GetMehediWindowBg(shihabDark);
@@ -2119,6 +2125,7 @@ namespace ShihabMehediIDM
             MouseUp += delegate { _shihabDragging = false; };
 
             ContextMenuStrip shihabCtx = new ContextMenuStrip();
+            shihabCtx.Renderer = new MehediDarkToolStripRenderer(true, false);
             shihabCtx.Items.Add("Hide Drop Target", null, delegate { Hide(); });
             ContextMenuStrip = shihabCtx;
         }
@@ -2137,22 +2144,22 @@ namespace ShihabMehediIDM
         {
             Graphics mehediG = shihabE.Graphics;
             mehediG.SmoothingMode = SmoothingMode.AntiAlias;
-            using (LinearGradientBrush shihabBg = new LinearGradientBrush(ClientRectangle, Color.FromArgb(15, 23, 42), Color.FromArgb(30, 41, 59), 45f))
+            using (LinearGradientBrush shihabBg = new LinearGradientBrush(ClientRectangle, Color.FromArgb(18, 19, 25), Color.FromArgb(26, 29, 44), 45f))
             {
                 mehediG.FillRectangle(shihabBg, ClientRectangle);
             }
-            using (Pen mehediBorder = new Pen(Color.FromArgb(96, 165, 250), 2f))
+            using (Pen mehediBorder = new Pen(Color.FromArgb(124, 92, 255), 2f))
             {
                 mehediG.DrawRectangle(mehediBorder, 1, 1, Width - 2, Height - 2);
             }
             using (Bitmap shihabLogo = ShihabThemePalette.CreateMehediLogoBitmap(34))
             using (Font shihabTitleFont = new Font("Segoe UI", 7.8f, FontStyle.Bold))
             using (Font mehediSubFont = new Font("Segoe UI Semibold", 7.3f))
-            using (SolidBrush shihabBrush = new SolidBrush(Color.White))
-            using (SolidBrush mehediBlue = new SolidBrush(Color.FromArgb(147, 197, 253)))
+            using (SolidBrush shihabBrush = new SolidBrush(Color.FromArgb(230, 234, 245)))
+            using (SolidBrush mehediViolet = new SolidBrush(Color.FromArgb(196, 181, 253)))
             {
                 mehediG.DrawImage(shihabLogo, (Width - 34) / 2, 7, 34, 34);
-                mehediG.DrawString("MHS DM", shihabTitleFont, mehediBlue, 19, 44);
+                mehediG.DrawString("MHS DM", shihabTitleFont, mehediViolet, 19, 44);
                 mehediG.DrawString(_mehediSpeedLabel, mehediSubFont, shihabBrush, 14, 62);
             }
         }

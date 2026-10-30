@@ -3,13 +3,33 @@
 }
 
 body {
-  width: 410px;
+  width: 445px;
   margin: 0;
   padding: 12px;
-  background: #0f172a;
-  color: #f1f5f9;
+  background: #121319;
+  color: #e6eaf5;
   font-family: 'Segoe UI', system-ui, sans-serif;
   font-size: 12.5px;
+  color-scheme: dark;
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #161821;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2d3248;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #7c5cff;
 }
 
 .shihab-header {
@@ -17,7 +37,7 @@ body {
   align-items: center;
   justify-content: space-between;
   padding-bottom: 10px;
-  border-bottom: 1px solid #1e293b;
+  border-bottom: 1px solid #242838;
 }
 
 .mehedi-brand {
@@ -55,21 +75,21 @@ body {
 
 .shihab-title {
   font-weight: 700;
-  font-size: 13.5px;
-  color: #f8fafc;
+  font-size: 12.2px;
+  color: #f4f6fc;
 }
 
 .mehedi-sub {
   font-size: 11px;
-  color: #94a3b8;
+  color: #848ca6;
   margin-top: 1px;
 }
 
 .shihab-toggle-btn {
-  background: #1e293b;
-  color: #60a5fa;
-  border: 1px solid #334155;
-  border-radius: 6px;
+  background: #191c28;
+  color: #a5b4fc;
+  border: 1px solid #2b3044;
+  border-radius: 8px;
   padding: 5px 10px;
   font: 600 11.5px 'Segoe UI', sans-serif;
   cursor: pointer;
@@ -83,7 +103,7 @@ body {
   display: block;
   font-weight: 600;
   font-size: 11.5px;
-  color: #cbd5e1;
+  color: #c7d0e8;
   margin-bottom: 5px;
 }
 
@@ -94,20 +114,25 @@ body {
 
 .mehedi-row input {
   flex: 1;
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  padding: 6px 8px;
-  color: #f8fafc;
+  background: #181a24;
+  border: 1px solid #292e42;
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: #f4f6fc;
   font-size: 12px;
+  outline: none;
+}
+
+.mehedi-row input:focus {
+  border-color: #7c5cff;
 }
 
 .mehedi-primary-btn {
-  background: linear-gradient(135deg, #2563eb, #9333ea);
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
   color: #fff;
   border: none;
-  border-radius: 6px;
-  padding: 6px 12px;
+  border-radius: 8px;
+  padding: 6px 14px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -130,9 +155,9 @@ body {
 }
 
 .shihab-retrack-popup-btn {
-  background: #1e293b;
-  color: #93c5fd;
-  border: 1px solid #334155;
+  background: #191c28;
+  color: #c4b5fd;
+  border: 1px solid #2b3044;
   border-radius: 6px;
   width: 24px;
   height: 22px;
@@ -148,7 +173,7 @@ body {
 }
 
 .shihab-retrack-popup-btn:hover {
-  background: #2563eb;
+  background: #7c5cff;
   color: #ffffff;
 }
 
@@ -157,7 +182,7 @@ body {
 }
 
 .mehedi-count {
-  background: linear-gradient(135deg, #2563eb, #db2777);
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
   color: #ffffff;
   border-radius: 10px;
   padding: 1px 8px;
@@ -168,14 +193,14 @@ body {
 .mehedi-streams-list {
   max-height: 225px;
   overflow-y: auto;
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 7px;
+  background: #161821;
+  border: 1px solid #262b3c;
+  border-radius: 9px;
   padding: 5px;
 }
 
 .shihab-empty {
-  color: #94a3b8;
+  color: #848ca6;
   font-size: 11.5px;
   padding: 8px;
   text-align: center;
@@ -187,9 +212,9 @@ body {
   justify-content: space-between;
   gap: 8px;
   padding: 6px 8px;
-  border-radius: 5px;
+  border-radius: 6px;
   cursor: pointer;
-  border-bottom: 1px solid rgba(51, 65, 85, 0.55);
+  border-bottom: 1px solid rgba(40, 45, 64, 0.7);
 }
 
 .shihab-stream-row:last-child {
@@ -197,7 +222,7 @@ body {
 }
 
 .shihab-stream-row:hover {
-  background: rgba(59, 130, 246, 0.24);
+  background: #202436;
 }
 
 .mehedi-stream-left {
@@ -275,15 +300,15 @@ body {
 .shihab-footer {
   margin-top: 12px;
   padding-top: 10px;
-  border-top: 1px solid #1e293b;
+  border-top: 1px solid #242838;
 }
 
 .mehedi-wide-btn {
   width: 100%;
-  background: linear-gradient(135deg, #2563eb, #db2777);
+  background: linear-gradient(135deg, #8b5cf6, #6366f1);
   color: #fff;
   border: none;
-  border-radius: 7px;
+  border-radius: 8px;
   padding: 8px 10px;
   font: 600 12px 'Segoe UI', sans-serif;
   cursor: pointer;
@@ -293,11 +318,11 @@ body {
   margin-top: 7px;
   text-align: center;
   font-size: 11px;
-  color: #94a3b8;
+  color: #848ca6;
 }
 
 .mehedi-hint a {
-  color: #60a5fa;
+  color: #a5b4fc;
   text-decoration: none;
   font-weight: 600;
 }

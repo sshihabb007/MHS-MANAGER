@@ -5,10 +5,10 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("MHS Download Manager")]
-[assembly: AssemblyDescription("MHS Download Manager — Multi-Segment Download Accelerator & Browser Video Suite by Mehedi Hasan Shihab")]
+[assembly: AssemblyTitle("MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)")]
+[assembly: AssemblyDescription("MHS Download Manager 1.0.0 (Mehedi Hasan Shihab) — Multi-Segment Download Accelerator & Browser Video Suite")]
 [assembly: AssemblyCompany("Mehedi Hasan Shihab (sshihabb007)")]
-[assembly: AssemblyProduct("MHS Download Manager")]
+[assembly: AssemblyProduct("MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)")]
 [assembly: AssemblyCopyright("Copyright © Mehedi Hasan Shihab — https://sshihabb007.github.io/")]
 [assembly: AssemblyVersion("1.0.0.0")]
 [assembly: AssemblyFileVersion("1.0.0.0")]
@@ -34,6 +34,7 @@ namespace ShihabMehediIDM
             }
 
             try { SetProcessDPIAware(); } catch { }
+            ShihabThemePalette.EnableShihabProcessDarkScrollbars();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 

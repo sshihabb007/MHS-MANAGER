@@ -12,7 +12,7 @@
     "128": "images/shihab_logo128.png"
   },
   "action": {
-    "default_title": "MHS Download Manager",
+    "default_title": "MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)",
     "default_popup": "shihab_popup.html",
     "default_icon": {
       "16": "images/shihab_logo16.png",
