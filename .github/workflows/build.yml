@@ -15,54 +15,50 @@ permissions:
   contents: write
 
 jobs:
-  build-windows-x64:
-    name: Build Windows x64 mdm.exe & Extension Bundle
+  build-windows-x64-installer:
+    name: Build Windows x64 Setup Installer
     runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile mdm.exe via build.ps1
+      - name: Compile mdm.exe & Setup Installer via build.ps1
         shell: pwsh
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
-      - name: Package Portable Distribution & SHA-256 Manifest
+      - name: Stage Official Setup Installer & SHA-256 Manifest
         shell: pwsh
         run: |
-          $StageDir = Join-Path $PWD "release-dist\MHS-Download-Manager"
-          New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
-
-          Copy-Item -Path ".\bin\mdm.exe" -Destination (Join-Path $StageDir "mdm.exe") -Force
-          Copy-Item -Path ".\extension" -Destination (Join-Path $StageDir "extension") -Recurse -Force
-          Copy-Item -Path ".\README.md" -Destination (Join-Path $StageDir "README.md") -Force
-          Copy-Item -Path ".\LICENSE" -Destination (Join-Path $StageDir "LICENSE") -Force
-
-          $ZipPath = Join-Path $PWD "release-dist\MHS-Download-Manager-Portable-x64.zip"
-          Compress-Archive -Path "$StageDir\*" -DestinationPath $ZipPath -Force
-
-          $ExeCopy = Join-Path $PWD "release-dist\mdm.exe"
-          Copy-Item -Path ".\bin\mdm.exe" -Destination $ExeCopy -Force
-
-          $ExeSha = (Get-FileHash -Path $ExeCopy -Algorithm SHA256).Hash.ToLowerInvariant()
-          $ZipSha = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $Sums = @(
-            "$ExeSha  mdm.exe",
-            "$ZipSha  MHS-Download-Manager-Portable-x64.zip"
-          )
-          Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value $Sums -Encoding UTF8
+          New-Item -ItemType Directory -Force -Path "release-dist" | Out-Null
 
           $TagVer = if ($env:GITHUB_REF_NAME -like 'v*') { $env:GITHUB_REF_NAME } else { 'v1.0.0' }
+          $VerClean = $TagVer.TrimStart('v')
+          $SetupFileName = "MHS-Download-Manager-Setup-$VerClean-x64.exe"
+
+          $BuiltSetup = Join-Path $PWD "bin\MHS-Download-Manager-Setup-1.0.0-x64.exe"
+          $StagedSetup = Join-Path $PWD "release-dist\$SetupFileName"
+          Copy-Item -LiteralPath $BuiltSetup -Destination $StagedSetup -Force
+
+          $SetupSha = (Get-FileHash -LiteralPath $StagedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value "$SetupSha  $SetupFileName" -Encoding UTF8
+
           $NotesLines = @(
-            "## MHS Download Manager $TagVer (Mehedi Hasan Shihab)",
+            "## MHS Download Manager $TagVer — Official Windows x64 Installer (Mehedi Hasan Shihab)",
             "",
-            "Standalone x64 Windows Download Accelerator (**``mdm.exe``**) + Manifest V3 Browser Extension (**``extension/``**) built with zero external runtime or ``ffmpeg`` dependencies.",
+            "Download and run **``$SetupFileName``** to install **MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)** along with its ready-to-load **``extension``** folder inside your installation directory.",
             "",
-            "### Included Release Downloads",
-            "- **``mdm.exe``** — Standalone Windows 10/11 (x64) desktop executable (``MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)``).",
-            "- **``MHS-Download-Manager-Portable-x64.zip``** — Complete portable bundle containing ``mdm.exe``, ``extension/`` (Chrome / Edge / Brave / Opera MV3 unpacked extension), ``README.md``, and ``LICENSE``.",
-            "- **``SHA256SUMS.txt``** — Verified SHA-256 digests.",
+            "### What the Setup Installer Creates in Your Installation Directory",
+            "- **``mdm.exe``** — MHS Download Manager 1.0.0 (x64 Windows Desktop Application)",
+            "- **``extension\``** — Complete unpacked Browser Extension folder inside the installation directory for **Google Chrome**, **Brave**, and **Microsoft Edge**",
+            "- **``Uninstall.exe``** — Clean Windows Uninstaller + *Installed Apps* registration, Desktop shortcut, Start Menu shortcuts, and Startup/Native Messaging integration",
+            "",
+            "### Loading the Browser Extension After Installation (Chrome / Brave / Edge)",
+            "1. Run **``$SetupFileName``** and complete the Setup Wizard (at the final step, Setup automatically copies the installed ``extension`` folder path and can open it directly in File Explorer; you can also open it anytime via **``Help -> Open Browser Extension Folder``**).",
+            "2. Open ``chrome://extensions`` (Chrome) or ``brave://extensions`` (Brave) or ``edge://extensions`` (Edge).",
+            "3. Enable **Developer mode** (top-right).",
+            "4. Click **Load unpacked** and select the **``extension``** folder inside your installation directory (default: ``%LOCALAPPDATA%\Programs\MHS Download Manager\extension``).",
             "",
             "### Latest Features Included",
             "- **Obsidian-Violet Dark Theme (``v1.0.0``)**: Pitch-dark DWM window frames, native dark scrollbars, live search bar, rounded purple-accent cards, ``40px`` borderless rows with inline cyan-to-violet progress bars, and ``MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)`` header branding across all windows and dialogs.",
@@ -72,29 +68,23 @@ jobs:
             "- **Automatic Browser Download Interception**: Captures direct and tokenized/redirect downloads (``.mkv``, ``.mp4``, ``.zip``, ``.rar``, ``R0*``, ``.exe``, ``.iso``, etc.) via ``chrome.downloads`` + ``Content-Disposition`` filename resolution, plus automatic Browser Fetch Relay recovery on session-bound ``403`` streams.",
             "- **Full Download Management Suite**: Dynamic in-flight segment splitting (``1–32`` connections), Pause/Resume, Per-Item & Global Speed Limiter, Queues, Scheduler, Site Grabber spider, Batch Download, ``.ef2``/``.txt`` Import & Export, 9-Tab Options dialog, System Tray integration, and Native Messaging host (``com.shihab.mehedi.idm``).",
             "",
-            "### Quick Setup",
-            "1. Download and extract **``MHS-Download-Manager-Portable-x64.zip``** (or download **``mdm.exe``** directly) and launch ``mdm.exe``.",
-            "2. In Chrome / Edge / Brave, open ``chrome://extensions`` (or ``edge://extensions``), enable **Developer mode**, click **Load unpacked**, and select the ``extension`` folder.",
-            "",
-            "### SHA-256 Checksums",
-            "| File | SHA-256 |",
+            "### SHA-256 Checksum",
+            "| Installer File | SHA-256 |",
             "| :--- | :--- |",
-            "| ``mdm.exe`` | ``$ExeSha`` |",
-            "| ``MHS-Download-Manager-Portable-x64.zip`` | ``$ZipSha`` |"
+            "| ``$SetupFileName`` | ``$SetupSha`` |"
           )
           Set-Content -Path (Join-Path $PWD "release-dist\RELEASE_NOTES.md") -Value ($NotesLines -join "`r`n") -Encoding UTF8
 
-      - name: Upload Build Artifacts
+      - name: Upload Setup Installer Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MHS-Download-Manager-Windows-x64
+          name: MHS-Download-Manager-Setup-Windows-x64
           path: |
-            release-dist/mdm.exe
-            release-dist/MHS-Download-Manager-Portable-x64.zip
+            release-dist/MHS-Download-Manager-Setup-*-x64.exe
             release-dist/SHA256SUMS.txt
           if-no-files-found: error
 
-      - name: Remove Stale Release Entry for Tag (if re-releasing)
+      - name: Remove Previous Release Entry for Tag (if re-releasing)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
@@ -114,6 +104,5 @@ jobs:
           body_path: release-dist/RELEASE_NOTES.md
           make_latest: "true"
           files: |
-            release-dist/mdm.exe
-            release-dist/MHS-Download-Manager-Portable-x64.zip
+            release-dist/MHS-Download-Manager-Setup-*-x64.exe
             release-dist/SHA256SUMS.txt

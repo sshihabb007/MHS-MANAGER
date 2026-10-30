@@ -223,6 +223,7 @@ namespace ShihabMehediIDM
 
             // Help menu + About menu
             ToolStripMenuItem mehediHelpMenu = new ToolStripMenuItem("&Help");
+            mehediHelpMenu.DropDownItems.Add("Open Browser Extension Folder (Chrome / Brave)...", null, delegate { OpenShihabInstalledExtensionFolder(); });
             mehediHelpMenu.DropDownItems.Add("Browser Extension Setup Guide", null, delegate { ShowShihabExtensionInstructions(); });
             mehediHelpMenu.DropDownItems.Add("Command-Line Switches (mdm.exe /d /s /p /f /n /q /a)", null, delegate { ShowMehediCliHelp(); });
             mehediHelpMenu.DropDownItems.Add(new ToolStripSeparator());
@@ -1609,23 +1610,56 @@ namespace ShihabMehediIDM
             }
         }
 
+        private static string ResolveShihabExtensionDirectoryPath()
+        {
+            string shihabInstalledExt = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "extension"));
+            if (Directory.Exists(shihabInstalledExt))
+            {
+                return shihabInstalledExt;
+            }
+            return Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..\\extension"));
+        }
+
+        private void OpenShihabInstalledExtensionFolder()
+        {
+            string mehediExtFolder = ResolveShihabExtensionDirectoryPath();
+            try
+            {
+                Clipboard.SetText(mehediExtFolder);
+            }
+            catch { }
+            try
+            {
+                if (Directory.Exists(mehediExtFolder))
+                {
+                    Process.Start("explorer.exe", "\"" + mehediExtFolder + "\"");
+                }
+                else
+                {
+                    ShowShihabExtensionInstructions();
+                }
+            }
+            catch { }
+        }
+
         private void ShowShihabExtensionInstructions()
         {
-            string mehediExtFolder = Path.GetFullPath(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "..\\extension"));
-            MessageBox.Show(
+            string mehediExtFolder = ResolveShihabExtensionDirectoryPath();
+            try { Clipboard.SetText(mehediExtFolder); } catch { }
+            DialogResult shihabOpenNow = MessageBox.Show(
                 this,
-                "MHS Download Manager Integration Module (Manifest V3 — Chrome / Edge / Brave / Opera):\n\n" +
-                "1. Open chrome://extensions or edge://extensions\n" +
+                "MHS Download Manager Integration Module (Manifest V3 — Chrome / Brave / Edge / Opera):\n\n" +
+                "1. Open chrome://extensions or brave://extensions (or edge://extensions)\n" +
                 "2. Enable 'Developer mode' in the top-right corner\n" +
-                "3. Click 'Load unpacked' (or Reload ↻) on:\n   " + mehediExtFolder + "\n\n" +
-                "Features active immediately via 127.0.0.1:" + _mehediConfig.MehediLocalBridgePort + " (+ optional Native Messaging):\n" +
-                "• Automatic file download takeover with Cookie + Referer + User-Agent forwarding\n" +
-                "• Hold Alt while clicking any link to bypass capture\n" +
-                "• Floating MHS Download corner icon on YouTube, Facebook, Instagram & HTML5 video players\n" +
-                "• Automatic extraction of exact selected-video titles & post captions\n",
+                "3. Click 'Load unpacked' and select:\n   " + mehediExtFolder + "\n   (Path copied to clipboard!)\n\n" +
+                "Would you like to open the extension folder in File Explorer now?",
                 ShihabThemePalette.ShihabMainHeaderTitle + " — Browser Extension",
-                MessageBoxButtons.OK,
+                MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information);
+            if (shihabOpenNow == DialogResult.Yes && Directory.Exists(mehediExtFolder))
+            {
+                try { Process.Start("explorer.exe", "\"" + mehediExtFolder + "\""); } catch { }
+            }
         }
 
         private void ShowMehediCliHelp()

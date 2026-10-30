@@ -4,7 +4,7 @@
 
 It compiles directly on any standard Windows 10/11 system using the built-in .NET Framework 4.8 C# compiler (`csc.exe`) with **zero external NuGet, DLL, or `ffmpeg` dependencies**.
 
-Prebuilt `mdm.exe` and `MHS-Download-Manager-Portable-x64.zip` bundles are built automatically via GitHub Actions and published under [**GitHub Releases**](https://github.com/sshihabb007/MHS-MANAGER/releases).
+Official Windows x64 Setup Installer (`MHS-Download-Manager-Setup-1.0.0-x64.exe`, which installs `mdm.exe`, `Uninstall.exe`, and the unpacked `extension\` folder inside your installation directory for Chrome / Brave / Edge) is built automatically via GitHub Actions and published under [**GitHub Releases**](https://github.com/sshihabb007/MHS-MANAGER/releases).
 
 ---
 
