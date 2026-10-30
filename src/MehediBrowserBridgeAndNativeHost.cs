@@ -325,6 +325,8 @@ namespace ShihabMehediIDM
         [DataMember(Name = "action")] public string ShihabAction { get; set; }
         [DataMember(Name = "capture")] public ShihabCapturedLinkDto MehediCapture { get; set; }
         [DataMember(Name = "batch")] public ShihabBatchCaptureDto ShihabBatch { get; set; }
+        [DataMember(Name = "videoId")] public string MehediVideoId { get; set; }
+        [DataMember(Name = "visitorData")] public string ShihabVisitorData { get; set; }
     }
 
     public class ShihabCliParsedArguments
@@ -615,6 +617,19 @@ namespace ShihabMehediIDM
                         {
                             _shihabConfig.MehediBrowserIntegrationEnabled = !_shihabConfig.MehediBrowserIntegrationEnabled;
                             WriteMehediJsonTcpResponse(shihabStream, 200, BuildShihabStatusReply("Toggled integration"));
+                            return;
+                        }
+
+                        if (shihabCleanPath == "/shihab/yt-streams" && string.Equals(mehediMethod, "GET", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string mehediYtId = ParseMehediQueryParam(shihabPath, "videoId");
+                            string shihabVisData = ParseMehediQueryParam(shihabPath, "visitorData");
+                            bool mehediForceYt = string.Equals(ParseMehediQueryParam(shihabPath, "force"), "1", StringComparison.OrdinalIgnoreCase);
+                            ShihabYouTubeStreamsReplyDto shihabYtReply = MehediYouTubeInnerTubeResolver.ResolveShihabYouTubeStreams(
+                                mehediYtId,
+                                shihabVisData,
+                                mehediForceYt);
+                            WriteMehediJsonTcpResponse(shihabStream, shihabYtReply.ShihabOk ? 200 : 400, shihabYtReply);
                             return;
                         }
 
@@ -979,6 +994,13 @@ namespace ShihabMehediIDM
 
                 EnsureShihabDesktopAppRunning(mehediPort);
 
+                if (shihabAct == "yt-streams" && mehediEnv != null && !string.IsNullOrWhiteSpace(mehediEnv.MehediVideoId))
+                {
+                    return SerializeShihabJson(MehediYouTubeInnerTubeResolver.ResolveShihabYouTubeStreams(
+                        mehediEnv.MehediVideoId,
+                        mehediEnv.ShihabVisitorData,
+                        false));
+                }
                 if (shihabAct == "capture" && mehediEnv.MehediCapture != null)
                 {
                     return PostLocalShihabJson(mehediPort, "/shihab/capture", SerializeShihabJson(mehediEnv.MehediCapture));

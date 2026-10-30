@@ -10,6 +10,7 @@
   window.__shihabMehediPageHookInstalled = true;
 
   let mehediNextVideoUidSeq = 1;
+  const mehediTopOrigFetch = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
   const shihabMediaSourceToBlobUrl = new WeakMap();
   const mehediBlobUrlToMediaSource = new Map();
   const mehediSourceBufferMeta = new WeakMap();
@@ -211,8 +212,32 @@
     }
   }
 
+  function shihabIsPoisonedYouTubeWebUrl(mehediRawUrl) {
+    if (!mehediRawUrl || typeof mehediRawUrl !== "string") return false;
+    try {
+      const shihabU = new URL(mehediRawUrl, location.href);
+      const mehediH = (shihabU.hostname || "").toLowerCase();
+      if (!mehediH.endsWith(".googlevideo.com") && mehediH !== "googlevideo.com") return false;
+      const shihabClient = (shihabU.searchParams.get("c") || "").toUpperCase();
+      if (
+        shihabClient === "WEB" ||
+        shihabClient === "MWEB" ||
+        shihabClient === "WEB_REMIX" ||
+        shihabClient === "WEB_CREATOR" ||
+        shihabClient === "TVHTML5"
+      ) {
+        return true;
+      }
+      if (shihabU.searchParams.has("siu") || shihabU.searchParams.has("sabr") || shihabU.searchParams.has("ump")) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
   function shihabLooksLikeMediaSliceUrl(mehediUrl) {
     if (!mehediUrl) return false;
+    if (shihabIsPoisonedYouTubeWebUrl(mehediUrl)) return false;
     const shihabLower = mehediUrl.toLowerCase();
     if (shihabLower.includes("ump=1") || shihabLower.includes("sabr=1")) return false;
     return (
@@ -436,12 +461,11 @@
     return "";
   }
 
-  // Extract YouTube plain unencrypted streamingData formats
-  function mehediInspectYouTubePlayerResponse(shihabPlayerObj) {
+  // Extract YouTube plain unencrypted streamingData formats & notify desktop InnerTube resolver
+  function mehediInspectYouTubePlayerResponse(shihabPlayerObj, mehediCustomUserAgent) {
     if (!shihabPlayerObj || typeof shihabPlayerObj !== "object") return "";
     const mehediStreaming = shihabPlayerObj.streamingData;
     const shihabDetails = shihabPlayerObj.videoDetails || {};
-    if (!mehediStreaming || typeof mehediStreaming !== "object") return "";
 
     const mehediVideoId = String(shihabDetails.videoId || "");
     const shihabVideoTitle = String(shihabDetails.title || "");
@@ -449,6 +473,40 @@
     const shihabDurationSec = Number(shihabDetails.lengthSeconds || 0);
     const shihabTitleHint = shihabVideoTitle || (mehediAuthor ? `${mehediAuthor} - YouTube Video` : "");
     const mehediYtGroupKey = mehediVideoId ? `yt:${mehediVideoId}` : "";
+
+    if (mehediVideoId && /^[A-Za-z0-9_-]{11}$/.test(mehediVideoId) && !mehediCustomUserAgent) {
+      const shihabDiscSig = `ytdisc:${mehediVideoId}:${shihabTitleHint ? 1 : 0}`;
+      if (!mehediEmittedManifestKeys.has(shihabDiscSig)) {
+        mehediEmittedManifestKeys.add(shihabDiscSig);
+        let mehediVisData = "";
+        try {
+          mehediVisData = String(
+            (shihabPlayerObj.responseContext && shihabPlayerObj.responseContext.visitorData) ||
+            (window.ytcfg && typeof window.ytcfg.get === "function" && window.ytcfg.get("VISITOR_DATA")) ||
+            ""
+          );
+          if (mehediVisData.includes("%")) {
+            mehediVisData = decodeURIComponent(mehediVisData);
+          }
+        } catch (_) {}
+        shihabPostToContentBridge("shihab_youtube_video_discovered", {
+          shihabVideoId: mehediVideoId,
+          mehediTitleHint: shihabTitleHint,
+          shihabDurationSec: shihabDurationSec,
+          mehediVisitorData: mehediVisData
+        });
+      }
+    }
+
+    if (!mehediStreaming || typeof mehediStreaming !== "object") return mehediYtGroupKey;
+
+    const shihabAllRawFormats = [
+      ...(Array.isArray(mehediStreaming.formats) ? mehediStreaming.formats : []),
+      ...(Array.isArray(mehediStreaming.adaptiveFormats) ? mehediStreaming.adaptiveFormats : [])
+    ];
+    const mehediHasDefaultAudioFlag = shihabAllRawFormats.some(
+      (shihabF) => shihabF && shihabF.audioTrack && shihabF.audioTrack.audioIsDefault === true
+    );
 
     const mehediOut = [];
     const shihabFormatBuckets = [
@@ -465,11 +523,15 @@
         if (mehediFmt.drmFamilies || mehediFmt.type === "FORMAT_STREAM_TYPE_OTF") {
           continue;
         }
+        if (mehediHasDefaultAudioFlag && mehediFmt.audioTrack && mehediFmt.audioTrack.audioIsDefault !== true) {
+          continue;
+        }
         const shihabCleanUrl = mehediNormalizeHookMediaUrl(mehediFmt.url);
-        if (!shihabCleanUrl) continue;
+        if (!shihabCleanUrl || shihabIsPoisonedYouTubeWebUrl(shihabCleanUrl)) continue;
 
         const mehediMimeRaw = String(mehediFmt.mimeType || "").toLowerCase();
         const shihabMimeBase = mehediMimeRaw.split(";")[0].trim();
+        if (shihabMimeBase.includes("3gpp")) continue;
         const mehediIsAudio = shihabMimeBase.startsWith("audio/");
         const shihabRole = shihabBucket.shihabDefaultRole === "progressive"
           ? "progressive"
@@ -488,6 +550,15 @@
         if (!(shihabBytes > 0) && mehediFmt.bitrate && mehediFmtDurSec > 0) {
           shihabBytes = Math.round((Number(mehediFmt.bitrate) * mehediFmtDurSec) / 8);
         }
+        const mehediIsOrigAud = Boolean(
+          (mehediFmt.audioTrack && mehediFmt.audioTrack.audioIsDefault === true) ||
+          (mehediFmt.audioTrack && /original/i.test(String(mehediFmt.audioTrack.displayName || ""))) ||
+          (mehediIsAudio && !mehediHasDefaultAudioFlag)
+        );
+        const shihabIsHdr = Boolean(
+          /HDR/i.test(String(mehediFmt.qualityLabel || "")) ||
+          (mehediFmt.colorInfo && /SMPTEST2084|ARIB_STD_B67/i.test(String(mehediFmt.colorInfo.transferCharacteristics || "")))
+        );
 
         mehediOut.push({
           shihabUrl: shihabCleanUrl,
@@ -503,7 +574,10 @@
           shihabGroupKey: mehediYtGroupKey,
           mehediShortcode: mehediVideoId,
           mehediAltIds: mehediVideoId ? [mehediVideoId, mehediYtGroupKey] : [],
-          shihabTitleHint: shihabTitleHint
+          shihabTitleHint: shihabTitleHint,
+          mehediCustomUserAgent: mehediCustomUserAgent || "",
+          shihabIsOriginalAudio: mehediIsOrigAud,
+          mehediIsHdr: shihabIsHdr
         });
       }
     }
@@ -518,6 +592,110 @@
       });
     }
     return mehediYtGroupKey;
+  }
+
+  async function shihabResolveYouTubeInPageMainWorld(mehediVideoId, shihabVisitorData) {
+    if (!mehediTopOrigFetch || !mehediVideoId || !/^[A-Za-z0-9_-]{11}$/.test(mehediVideoId)) return;
+    if (!/youtube\.com$/i.test(location.hostname)) return;
+
+    let mehediCleanVis = String(
+      shihabVisitorData ||
+      (window.ytcfg && typeof window.ytcfg.get === "function" && window.ytcfg.get("VISITOR_DATA")) ||
+      ""
+    );
+    try {
+      if (mehediCleanVis.includes("%")) {
+        mehediCleanVis = decodeURIComponent(mehediCleanVis);
+      }
+    } catch (_) {}
+
+    const mehediClients = [
+      {
+        shihabHeaderId: "101",
+        mehediClientVer: "1.02",
+        shihabUa: "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15",
+        mehediClientCtx: {
+          clientName: "VISIONOS",
+          clientVersion: "1.02",
+          deviceMake: "Apple",
+          deviceModel: "RealityDevice17,1",
+          osName: "visionOS",
+          osVersion: "26.5.23O471",
+          hl: "en",
+          utcOffsetMinutes: 0
+        }
+      },
+      {
+        shihabHeaderId: "3",
+        mehediClientVer: "20.10.38",
+        shihabUa: "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip",
+        mehediClientCtx: {
+          clientName: "ANDROID",
+          clientVersion: "20.10.38",
+          androidSdkVersion: 34,
+          osName: "Android",
+          osVersion: "14",
+          hl: "en",
+          utcOffsetMinutes: 0
+        }
+      },
+      {
+        shihabHeaderId: "5",
+        mehediClientVer: "20.10.4",
+        shihabUa: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
+        mehediClientCtx: {
+          clientName: "IOS",
+          clientVersion: "20.10.4",
+          deviceMake: "Apple",
+          deviceModel: "iPhone16,2",
+          osName: "iPhone",
+          osVersion: "18.3.2.22D82",
+          hl: "en",
+          utcOffsetMinutes: 0
+        }
+      }
+    ];
+
+    for (const shihabCfg of mehediClients) {
+      try {
+        const mehediClientPayload = Object.assign({}, shihabCfg.mehediClientCtx);
+        if (mehediCleanVis) {
+          mehediClientPayload.visitorData = mehediCleanVis;
+        }
+        const shihabHeadersObj = {
+          "Content-Type": "application/json",
+          "X-YouTube-Client-Name": shihabCfg.shihabHeaderId,
+          "X-YouTube-Client-Version": shihabCfg.mehediClientVer,
+          "X-Goog-Api-Format-Version": "2"
+        };
+        if (mehediCleanVis) {
+          shihabHeadersObj["X-Goog-Visitor-Id"] = mehediCleanVis;
+        }
+        const shihabResp = await mehediTopOrigFetch("/youtubei/v1/player?prettyPrint=false", {
+          method: "POST",
+          credentials: "omit",
+          headers: shihabHeadersObj,
+          body: JSON.stringify({
+            videoId: mehediVideoId,
+            racyCheckOk: true,
+            contentCheckOk: true,
+            context: { client: mehediClientPayload },
+            playbackContext: { contentPlaybackContext: { html5Preference: "HTML5_PREF_WANTS" } }
+          })
+        });
+        if (!shihabResp || !shihabResp.ok) continue;
+        const mehediData = await shihabResp.json();
+        if (
+          mehediData &&
+          mehediData.playabilityStatus &&
+          mehediData.playabilityStatus.status === "OK" &&
+          mehediData.streamingData
+        ) {
+          mehediInspectYouTubePlayerResponse(mehediData, shihabCfg.shihabUa);
+          return;
+        }
+      } catch (_) {}
+    }
   }
 
   function mehediStripHookTranslationSuffix(shihabRawText) {
@@ -1405,6 +1583,13 @@
         if (shihabMatchingVid) {
           mehediInspectLiveDomVideoElement(shihabMatchingVid);
         }
+        return;
+      }
+      if (shihabEv.data.__shihabResolveYtInMainWorld) {
+        shihabResolveYouTubeInPageMainWorld(
+          String(shihabEv.data.__shihabResolveYtInMainWorld || ""),
+          String(shihabEv.data.mehediVisitorData || "")
+        );
         return;
       }
       if (shihabEv.data.__shihabMehediContentPing === true) {

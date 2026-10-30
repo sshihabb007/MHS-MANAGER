@@ -152,6 +152,68 @@
     }
   }
 
+  const shihabRequestedYtVideoIdsMs = new Map();
+
+  function shihabExtractCurrentPageYouTubeVideoId() {
+    try {
+      const mehediHost = (location.hostname || "").toLowerCase();
+      if (mehediHost === "youtu.be" || mehediHost.endsWith(".youtu.be")) {
+        const shihabFirst = (location.pathname || "").replace(/^\/+/, "").split("/")[0] || "";
+        return /^[A-Za-z0-9_-]{11}$/.test(shihabFirst) ? shihabFirst : "";
+      }
+      if (
+        mehediHost === "youtube.com" ||
+        mehediHost.endsWith(".youtube.com") ||
+        mehediHost === "youtube-nocookie.com" ||
+        mehediHost.endsWith(".youtube-nocookie.com")
+      ) {
+        const shihabV = new URLSearchParams(location.search).get("v") || "";
+        if (/^[A-Za-z0-9_-]{11}$/.test(shihabV)) return shihabV;
+        const mehediPathMatch = (location.pathname || "").match(/^\/(?:shorts|embed|live|v)\/([A-Za-z0-9_-]{11})(?:[/?#]|$)/i);
+        if (mehediPathMatch && mehediPathMatch[1]) return mehediPathMatch[1];
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  function mehediRequestYouTubeResolutionForVideoId(shihabVidId, mehediTitleHint, shihabVisitorData, mehediForceRefresh) {
+    if (!shihabVidId || !/^[A-Za-z0-9_-]{11}$/.test(shihabVidId)) return;
+    const mehediNow = Date.now();
+    const shihabPrevMs = shihabRequestedYtVideoIdsMs.get(shihabVidId) || 0;
+    if (!mehediForceRefresh && mehediNow - shihabPrevMs < 8000) {
+      return;
+    }
+    shihabRequestedYtVideoIdsMs.set(shihabVidId, mehediNow);
+
+    const mehediYtGrp = `yt:${shihabVidId}`;
+    if (mehediTitleHint) {
+      shihabGroupKeyTitleMap.set(mehediYtGrp, mehediTitleHint);
+    }
+    mehediIndexIdentifierToGroup(shihabVidId, mehediYtGrp, mehediTitleHint || "");
+
+    try {
+      chrome.runtime.sendMessage({
+        shihabCmd: "mehedi_resolve_youtube_video",
+        shihabVideoId: shihabVidId,
+        mehediTitleHint: mehediTitleHint || "",
+        shihabVisitorData: shihabVisitorData || "",
+        mehediForce: Boolean(mehediForceRefresh)
+      }).then((shihabAck) => {
+        if (shihabAck && Array.isArray(shihabAck.mehediStreams) && shihabAck.mehediStreams.length > 0) {
+          shihabTabStreamsCache = shihabAck.mehediStreams;
+          shihabRenderFloatingIdmVideoPanel();
+        } else if (shihabAck && shihabAck.shihabUsePageFallback) {
+          try {
+            window.postMessage({
+              __shihabResolveYtInMainWorld: shihabVidId,
+              mehediVisitorData: shihabVisitorData || ""
+            }, "*");
+          } catch (_) {}
+        }
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
   function mehediEnsureVideoUidAndInspect(shihabVidEl, mehediForceInspect) {
     if (!shihabVidEl || shihabVidEl.tagName !== "VIDEO") return "";
     if (!shihabVidEl.dataset.shihabVidUid) {
@@ -256,6 +318,16 @@
           mehediUrlSet.add(shihabStreamClean);
         }
         shihabRenderFloatingIdmVideoPanel();
+      }
+      return;
+    }
+
+    if (mehediKind === "shihab_youtube_video_discovered") {
+      const mehediYtId = String(shihabPayload.shihabVideoId || "");
+      const shihabYtTitle = String(shihabPayload.mehediTitleHint || "");
+      const mehediVisData = String(shihabPayload.mehediVisitorData || "");
+      if (mehediYtId && /^[A-Za-z0-9_-]{11}$/.test(mehediYtId)) {
+        mehediRequestYouTubeResolutionForVideoId(mehediYtId, shihabYtTitle, mehediVisData, false);
       }
       return;
     }
@@ -470,20 +542,12 @@
       }
     }
 
-    // 2. Single-video page route parameters (YouTube Watch/Shorts, Instagram Reel/Post, Facebook Reel/Watch/Videos, X Status)
-    if (mehediHost.includes("youtube.com") || mehediHost.includes("youtu.be")) {
-      if (shihabPath === "/watch") {
-        const mehediVidId = new URLSearchParams(location.search).get("v") || "";
-        if (mehediVidId) {
-          shihabShortcodes.add(mehediVidId);
-          mehediRouteAndCardGroupKeys.add(`yt:${mehediVidId}`);
-        }
-      } else {
-        const shihabShortsMatch = shihabPath.match(/^\/shorts\/([A-Za-z0-9_-]+)/);
-        if (shihabShortsMatch) {
-          shihabShortcodes.add(shihabShortsMatch[1]);
-          mehediRouteAndCardGroupKeys.add(`yt:${shihabShortsMatch[1]}`);
-        }
+    // 2. Single-video page route parameters (YouTube Watch/Shorts/Embed/Live, Instagram Reel/Post, Facebook Reel/Watch/Videos, X Status)
+    if (mehediHost.includes("youtube.com") || mehediHost.includes("youtu.be") || mehediHost.includes("youtube-nocookie.com")) {
+      const mehediPageYtId = shihabExtractCurrentPageYouTubeVideoId();
+      if (mehediPageYtId) {
+        shihabShortcodes.add(mehediPageYtId);
+        mehediRouteAndCardGroupKeys.add(`yt:${mehediPageYtId}`);
       }
     } else {
       const mehediRouteMatch = shihabPath.match(/\/(?:reel|reels|p|tv|videos|status)\/([A-Za-z0-9_-]+)/i);
@@ -522,6 +586,13 @@
         if (shihabWatchHrefMatch && shihabWatchHrefMatch[1]) {
           shihabShortcodes.add(shihabWatchHrefMatch[1]);
           shihabShortcodes.add(`vid:${shihabWatchHrefMatch[1]}`);
+        }
+        if (mehediHost.includes("youtube.com")) {
+          const mehediYtHrefMatch = shihabHref.match(/(?:[?&]v=|\/shorts\/)([A-Za-z0-9_-]{11})(?:[&#?/]|$)/);
+          if (mehediYtHrefMatch && mehediYtHrefMatch[1]) {
+            shihabShortcodes.add(mehediYtHrefMatch[1]);
+            mehediRouteAndCardGroupKeys.add(`yt:${mehediYtHrefMatch[1]}`);
+          }
         }
       }
     }
@@ -1805,6 +1876,10 @@
     if (location.href !== mehediLastObservedPageHref) {
       mehediLastObservedPageHref = location.href;
       shihabDropdownOpen = false;
+      const shihabNavYtId = shihabExtractCurrentPageYouTubeVideoId();
+      if (shihabNavYtId) {
+        mehediRequestYouTubeResolutionForVideoId(shihabNavYtId, "", "", false);
+      }
     }
 
     if (!mehediShowFloatingBar || (shihabPanelDismissedUrl && shihabPanelDismissedUrl === location.href)) {
@@ -1968,6 +2043,7 @@
         mehediTabTitle: shihabRealTitle || document.title || "",
         shihabOrigin: shihabStreamEntry.shihabOrigin || location.origin || "",
         mehediOmitCookies: shihabStreamEntry.mehediOmitCookies,
+        mehediUserAgent: shihabStreamEntry.mehediCustomUserAgent || "",
         mehediAudioCompanionUrl: shihabStreamEntry.mehediAudioCompanionUrl || "",
         shihabAudioCompanionBytes: shihabStreamEntry.shihabAudioCompanionBytes || -1,
         shihabQualityLabel: mehediQualTag
@@ -2156,6 +2232,10 @@
       try {
         window.postMessage({ __shihabMehediContentPing: true }, "*");
       } catch (_) {}
+      const shihabRetrackYtId = shihabExtractCurrentPageYouTubeVideoId();
+      if (shihabRetrackYtId) {
+        mehediRequestYouTubeResolutionForVideoId(shihabRetrackYtId, "", "", true);
+      }
       shihabPanelDismissedUrl = "";
       shihabRenderFloatingIdmVideoPanel();
       shihabReply({ ok: true });
@@ -2324,6 +2404,11 @@
     try {
       window.postMessage({ __shihabMehediContentPing: true }, "*");
     } catch (_) {}
+
+    const shihabInitialYtId = shihabExtractCurrentPageYouTubeVideoId();
+    if (shihabInitialYtId) {
+      mehediRequestYouTubeResolutionForVideoId(shihabInitialYtId, "", "", false);
+    }
 
     shihabRefreshBackgroundStreamsThrottled(true).then(() => {
       shihabRenderFloatingIdmVideoPanel();

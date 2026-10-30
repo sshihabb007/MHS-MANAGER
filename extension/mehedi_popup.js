@@ -148,6 +148,7 @@ document.addEventListener("DOMContentLoaded", async () => {
             mehediTabTitle: mehediCleanTitle,
             shihabOrigin: shihabStream.shihabOrigin || "",
             mehediOmitCookies: shihabStream.mehediOmitCookies,
+            mehediUserAgent: shihabStream.mehediCustomUserAgent || "",
             mehediAudioCompanionUrl: shihabStream.mehediAudioCompanionUrl || "",
             shihabAudioCompanionBytes: shihabStream.shihabAudioCompanionBytes || -1,
             shihabQualityLabel: shihabStream.shihabQualityLabel || shihabStream.shihabResolution || (shihabIsAudio ? "Audio" : ""),
