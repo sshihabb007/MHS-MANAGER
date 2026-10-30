@@ -53,6 +53,37 @@ jobs:
           )
           Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value $Sums -Encoding UTF8
 
+          $TagVer = if ($env:GITHUB_REF_NAME -like 'v*') { $env:GITHUB_REF_NAME } else { 'v1.0.0' }
+          $NotesLines = @(
+            "## MHS Download Manager $TagVer (Mehedi Hasan Shihab)",
+            "",
+            "Standalone x64 Windows Download Accelerator (**``mdm.exe``**) + Manifest V3 Browser Extension (**``extension/``**) built with zero external runtime or ``ffmpeg`` dependencies.",
+            "",
+            "### Included Release Downloads",
+            "- **``mdm.exe``** — Standalone Windows 10/11 (x64) desktop executable (``MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)``).",
+            "- **``MHS-Download-Manager-Portable-x64.zip``** — Complete portable bundle containing ``mdm.exe``, ``extension/`` (Chrome / Edge / Brave / Opera MV3 unpacked extension), ``README.md``, and ``LICENSE``.",
+            "- **``SHA256SUMS.txt``** — Verified SHA-256 digests.",
+            "",
+            "### Latest Features Included",
+            "- **Obsidian-Violet Dark Theme (``v1.0.0``)**: Pitch-dark DWM window frames, native dark scrollbars, live search bar, rounded purple-accent cards, ``40px`` borderless rows with inline cyan-to-violet progress bars, and ``MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)`` header branding across all windows and dialogs.",
+            "- **High-Speed YouTube HD/4K & Unthrottled Companion Audio**: Direct InnerTube stream resolution (``144p`` up to ``1080p``/``1440p``/``2160p 4K`` + original ``M4A``/``Opus`` audio) paired with parallel burst-sliced HTTP ``206`` range workers (``1 MiB`` audio / ``4 MiB`` video slices over warm ``KeepAlive`` TLS sockets) so both large videos and long companion audio tracks finish in seconds with live ``Transfer rate`` and ``Time left``.",
+            "- **Exact Selected-Video Tracking & Compact Corner Bar (``↻``)**: Icon-only floating video widget (``[MHS Icon] [1080p · N] | [↻] [▾] [×]``) with one-click Reloader (``↻``) that isolates strictly the selected video on Facebook, Instagram, YouTube, X, TikTok, Reddit, and HTML5 players with exact video captions/titles, resolutions, ``VIDEO``/``AUDIO`` badges, and file sizes.",
+            "- **Zero-Dependency Lossless Video + Audio Muxing**: Built-in C# ISO-BMFF & Matroska muxer (``MP4/fMP4 + M4A -> Fast-Start .mp4``, ``MP4 + WebM Opus -> .mp4``, ``WebM + WebM -> .webm``, ``WebM + M4A -> .mkv``) guaranteeing full audio on adaptive streams while respecting DRM protections.",
+            "- **Automatic Browser Download Interception**: Captures direct and tokenized/redirect downloads (``.mkv``, ``.mp4``, ``.zip``, ``.rar``, ``R0*``, ``.exe``, ``.iso``, etc.) via ``chrome.downloads`` + ``Content-Disposition`` filename resolution, plus automatic Browser Fetch Relay recovery on session-bound ``403`` streams.",
+            "- **Full Download Management Suite**: Dynamic in-flight segment splitting (``1–32`` connections), Pause/Resume, Per-Item & Global Speed Limiter, Queues, Scheduler, Site Grabber spider, Batch Download, ``.ef2``/``.txt`` Import & Export, 9-Tab Options dialog, System Tray integration, and Native Messaging host (``com.shihab.mehedi.idm``).",
+            "",
+            "### Quick Setup",
+            "1. Download and extract **``MHS-Download-Manager-Portable-x64.zip``** (or download **``mdm.exe``** directly) and launch ``mdm.exe``.",
+            "2. In Chrome / Edge / Brave, open ``chrome://extensions`` (or ``edge://extensions``), enable **Developer mode**, click **Load unpacked**, and select the ``extension`` folder.",
+            "",
+            "### SHA-256 Checksums",
+            "| File | SHA-256 |",
+            "| :--- | :--- |",
+            "| ``mdm.exe`` | ``$ExeSha`` |",
+            "| ``MHS-Download-Manager-Portable-x64.zip`` | ``$ZipSha`` |"
+          )
+          Set-Content -Path (Join-Path $PWD "release-dist\RELEASE_NOTES.md") -Value ($NotesLines -join "`r`n") -Encoding UTF8
+
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -63,12 +94,25 @@ jobs:
             release-dist/SHA256SUMS.txt
           if-no-files-found: error
 
+      - name: Remove Stale Release Entry for Tag (if re-releasing)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "${{ github.ref_name }}" *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release delete "${{ github.ref_name }}" --yes
+          }
+          $global:LASTEXITCODE = 0
+
       - name: Publish GitHub Release on Version Tag
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: "MHS Download Manager ${{ github.ref_name }}"
-          generate_release_notes: true
+          name: "MHS Download Manager ${{ github.ref_name }} (Mehedi Hasan Shihab)"
+          body_path: release-dist/RELEASE_NOTES.md
+          make_latest: "true"
           files: |
             release-dist/mdm.exe
             release-dist/MHS-Download-Manager-Portable-x64.zip
