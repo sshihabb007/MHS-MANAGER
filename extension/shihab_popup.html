@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MHS Download Manager</title>
+  <link rel="stylesheet" href="shihab_popup.css" />
+  <script src="mehedi_popup.js" defer></script>
+</head>
+<body>
+  <header class="shihab-header">
+    <div class="mehedi-brand">
+      <img src="images/shihab_logo32.png" alt="MHS" class="shihab-brand-logo" />
+      <div>
+        <div class="shihab-title-row">
+          <span class="shihab-dot" id="shihabStatusDot"></span>
+          <span class="shihab-title">MHS Download Manager</span>
+        </div>
+        <div class="mehedi-sub" id="mehediConnectionSub">Checking mdm.exe bridge...</div>
+      </div>
+    </div>
+    <button class="shihab-toggle-btn" id="shihabToggleCaptureBtn">Enabled</button>
+  </header>
+
+  <section class="mehedi-section">
+    <label class="shihab-label">Quick Send URL to MHS Download Manager</label>
+    <div class="mehedi-row">
+      <input type="url" id="shihabQuickUrlInput" placeholder="https://example.com/file.zip" />
+      <button class="mehedi-primary-btn" id="mehediSendUrlBtn">Send</button>
+    </div>
+  </section>
+
+  <section class="mehedi-section">
+    <div class="shihab-sec-head">
+      <span class="shihab-label">Detected Videos &amp; Streams on Active Tab</span>
+      <div class="mehedi-sec-actions">
+        <button class="shihab-retrack-popup-btn" id="mehediRetrackTabBtn" title="Re-track active video on this tab">↻</button>
+        <span class="mehedi-count" id="shihabStreamCountBadge">0</span>
+      </div>
+    </div>
+    <div class="mehedi-streams-list" id="mehediStreamsContainer">
+      <div class="shihab-empty">Play any web video on this tab to capture it with its real title.</div>
+    </div>
+  </section>
+
+  <footer class="shihab-footer">
+    <button class="mehedi-wide-btn" id="shihabGrabAllLinksBtn">⬇ Download All Links on Current Tab</button>
+    <div class="mehedi-hint">
+      Hold <b>Alt</b> while clicking to bypass · By <a href="https://sshihabb007.github.io/" target="_blank" rel="noopener">Mehedi Hasan Shihab</a>
+    </div>
+  </footer>
+</body>
+</html>

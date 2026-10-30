@@ -1,65 +1,47 @@
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+$shihabProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+$mehediBinDir = Join-Path $shihabProjectRoot 'bin'
+$shihabAssetsDir = Join-Path $shihabProjectRoot 'assets'
+$mehediIconIco = Join-Path $shihabAssetsDir 'mdm.ico'
+$shihabIconPng = Join-Path $shihabAssetsDir 'mdm.png'
 
-$RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$AssetsDir = Join-Path $RootDir "assets"
-$BinDir = Join-Path $RootDir "bin"
-$ExtIconsDir = Join-Path $RootDir "browser-extension\icons"
+New-Item -ItemType Directory -Force -Path $mehediBinDir | Out-Null
 
-New-Item -ItemType Directory -Force -Path $AssetsDir | Out-Null
-New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
-New-Item -ItemType Directory -Force -Path $ExtIconsDir | Out-Null
-
-$CscPath = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-if (-not (Test-Path $CscPath)) {
-    $CscPath = "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe"
-}
-if (-not (Test-Path $CscPath)) {
-    throw "Could not find .NET Framework csc.exe compiler at $CscPath"
+if (-not (Test-Path $mehediIconIco) -or -not (Test-Path $shihabIconPng)) {
+    throw "Required official icon assets missing in $shihabAssetsDir"
 }
 
-Write-Host "[1/2] Generating multi-resolution MHSManager.ico and WebExtension icons..." -ForegroundColor Cyan
-$IconGenExe = Join-Path $AssetsDir "GenerateIcon.exe"
-$IconGenSrc = Join-Path $RootDir "tools\GenerateIcon.cs"
-$IcoFile = Join-Path $AssetsDir "MHSManager.ico"
+# Compile x64 mdm.exe (MHS Download Manager) using .NET Framework 4.8 csc.exe with embedded Win32 & managed icons
+$shihabCsc = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+$mehediOutExe = Join-Path $mehediBinDir 'mdm.exe'
+$shihabSources = @(
+    (Join-Path $shihabProjectRoot 'src\ShihabDownloadModels.cs'),
+    (Join-Path $shihabProjectRoot 'src\MehediMediaMuxer.cs'),
+    (Join-Path $shihabProjectRoot 'src\MehediDynamicSegmentEngine.cs'),
+    (Join-Path $shihabProjectRoot 'src\MehediBrowserBridgeAndNativeHost.cs'),
+    (Join-Path $shihabProjectRoot 'src\MehediDialogsAndProgress.cs'),
+    (Join-Path $shihabProjectRoot 'src\ShihabToolsWindows.cs'),
+    (Join-Path $shihabProjectRoot 'src\ShihabMainIdmWindow.cs'),
+    (Join-Path $shihabProjectRoot 'src\MehediProgramEntry.cs')
+)
 
-& $CscPath /nologo /target:exe /optimize+ /r:System.Drawing.dll "/out:$IconGenExe" "$IconGenSrc"
+& $shihabCsc /nologo /target:winexe /platform:x64 /optimize+ `
+    /r:System.dll `
+    /r:System.Core.dll `
+    /r:System.Drawing.dll `
+    /r:System.Windows.Forms.dll `
+    /r:System.Runtime.Serialization.dll `
+    /r:System.Xml.dll `
+    "/win32icon:$mehediIconIco" `
+    "/resource:$mehediIconIco,ShihabMehediIDM.mdm_icon.ico" `
+    "/resource:$shihabIconPng,ShihabMehediIDM.mdm_icon.png" `
+    "/out:$mehediOutExe" `
+    @shihabSources
+
 if ($LASTEXITCODE -ne 0) {
-    throw "Failed to compile GenerateIcon.cs"
+    throw "csc.exe failed with exit code $LASTEXITCODE"
 }
 
-& $IconGenExe "$IcoFile" "$ExtIconsDir"
-if ($LASTEXITCODE -ne 0) {
-    throw "Failed to execute GenerateIcon.exe"
-}
-Remove-Item -Force $IconGenExe -ErrorAction SilentlyContinue
-
-Write-Host "[2/2] Compiling MHSManager.exe (x64 Native Windows GUI)..." -ForegroundColor Cyan
-$OutExe = Join-Path $BinDir "MHSManager.exe"
-$ManifestPath = Join-Path $RootDir "src\app.manifest"
-$Sources = Get-ChildItem -Path (Join-Path $RootDir "src") -Filter "*.cs" | Sort-Object Name | ForEach-Object { $_.FullName }
-
-$CompileArgs = @(
-    "/nologo",
-    "/target:winexe",
-    "/platform:x64",
-    "/optimize+",
-    "/win32icon:$IcoFile",
-    "/win32manifest:$ManifestPath",
-    "/r:System.dll",
-    "/r:System.Core.dll",
-    "/r:System.Drawing.dll",
-    "/r:System.Windows.Forms.dll",
-    "/r:System.Web.Extensions.dll",
-    "/out:$OutExe"
-) + $Sources
-
-& $CscPath @CompileArgs
-if ($LASTEXITCODE -ne 0) {
-    throw "Compilation of MHSManager.exe failed with exit code $LASTEXITCODE"
-}
-
-$ExeInfo = Get-Item $OutExe
-$ExeHash = (Get-FileHash -Path $OutExe -Algorithm SHA256).Hash.ToLowerInvariant()
-Write-Host ("SUCCESS: Built {0} ({1:N0} bytes)" -f $ExeInfo.FullName, $ExeInfo.Length) -ForegroundColor Green
-Write-Host ("SHA-256: {0}" -f $ExeHash) -ForegroundColor DarkGray
-
+$shihabHash = (Get-FileHash $mehediOutExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$mehediSize = (Get-Item $mehediOutExe).Length
+Write-Output "BUILD SUCCESS: $mehediOutExe ($mehediSize bytes, SHA256=$shihabHash)"

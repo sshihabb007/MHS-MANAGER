@@ -1,4 +1,4 @@
-name: Build & Release MHS Manager
+name: Build & Release MHS Download Manager
 
 on:
   push:
@@ -16,14 +16,14 @@ permissions:
 
 jobs:
   build-windows-x64:
-    name: Build Windows x64 Executable & Extension Bundle
+    name: Build Windows x64 mdm.exe & Extension Bundle
     runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile MHSManager.exe via build.ps1
+      - name: Compile mdm.exe via build.ps1
         shell: pwsh
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
@@ -31,35 +31,35 @@ jobs:
       - name: Package Portable Distribution & SHA-256 Manifest
         shell: pwsh
         run: |
-          $StageDir = Join-Path $PWD "release-dist\MHS-Manager"
+          $StageDir = Join-Path $PWD "release-dist\MHS-Download-Manager"
           New-Item -ItemType Directory -Force -Path $StageDir | Out-Null
 
-          Copy-Item -Path ".\bin\MHSManager.exe" -Destination (Join-Path $StageDir "MHSManager.exe") -Force
-          Copy-Item -Path ".\browser-extension" -Destination (Join-Path $StageDir "browser-extension") -Recurse -Force
+          Copy-Item -Path ".\bin\mdm.exe" -Destination (Join-Path $StageDir "mdm.exe") -Force
+          Copy-Item -Path ".\extension" -Destination (Join-Path $StageDir "extension") -Recurse -Force
           Copy-Item -Path ".\README.md" -Destination (Join-Path $StageDir "README.md") -Force
           Copy-Item -Path ".\LICENSE" -Destination (Join-Path $StageDir "LICENSE") -Force
 
-          $ZipPath = Join-Path $PWD "release-dist\MHS-Manager-Portable-x64.zip"
+          $ZipPath = Join-Path $PWD "release-dist\MHS-Download-Manager-Portable-x64.zip"
           Compress-Archive -Path "$StageDir\*" -DestinationPath $ZipPath -Force
 
-          $ExeCopy = Join-Path $PWD "release-dist\MHSManager.exe"
-          Copy-Item -Path ".\bin\MHSManager.exe" -Destination $ExeCopy -Force
+          $ExeCopy = Join-Path $PWD "release-dist\mdm.exe"
+          Copy-Item -Path ".\bin\mdm.exe" -Destination $ExeCopy -Force
 
           $ExeSha = (Get-FileHash -Path $ExeCopy -Algorithm SHA256).Hash.ToLowerInvariant()
           $ZipSha = (Get-FileHash -Path $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
           $Sums = @(
-            "$ExeSha  MHSManager.exe",
-            "$ZipSha  MHS-Manager-Portable-x64.zip"
+            "$ExeSha  mdm.exe",
+            "$ZipSha  MHS-Download-Manager-Portable-x64.zip"
           )
           Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value $Sums -Encoding UTF8
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MHSManager-Windows-x64
+          name: MHS-Download-Manager-Windows-x64
           path: |
-            release-dist/MHSManager.exe
-            release-dist/MHS-Manager-Portable-x64.zip
+            release-dist/mdm.exe
+            release-dist/MHS-Download-Manager-Portable-x64.zip
             release-dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -67,9 +67,9 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: "MHS Manager ${{ github.ref_name }}"
+          name: "MHS Download Manager ${{ github.ref_name }}"
           generate_release_notes: true
           files: |
-            release-dist/MHSManager.exe
-            release-dist/MHS-Manager-Portable-x64.zip
+            release-dist/mdm.exe
+            release-dist/MHS-Download-Manager-Portable-x64.zip
             release-dist/SHA256SUMS.txt
