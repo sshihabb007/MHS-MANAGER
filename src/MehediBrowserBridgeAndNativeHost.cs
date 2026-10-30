@@ -802,7 +802,7 @@ namespace ShihabMehediIDM
             {
                 ShihabOk = true,
                 MehediAppName = "MHS Download Manager",
-                ShihabVersion = "6.43.4",
+                ShihabVersion = "1.0.0",
                 MehediIntegrationEnabled = _shihabConfig.MehediBrowserIntegrationEnabled,
                 ShihabShowVideoPanel = _shihabConfig.ShihabShowVideoFloatingPanel,
                 MehediPanelMiniMode = _shihabConfig.ShihabPanelMiniMode,
@@ -824,7 +824,7 @@ namespace ShihabMehediIDM
             {
                 ShihabOk = false,
                 MehediAppName = "MHS Download Manager",
-                ShihabVersion = "6.43.4",
+                ShihabVersion = "1.0.0",
                 MehediMessage = mehediErr
             };
         }

@@ -10,8 +10,9 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("Mehedi Hasan Shihab (sshihabb007)")]
 [assembly: AssemblyProduct("MHS Download Manager")]
 [assembly: AssemblyCopyright("Copyright © Mehedi Hasan Shihab — https://sshihabb007.github.io/")]
-[assembly: AssemblyVersion("6.43.4.0")]
-[assembly: AssemblyFileVersion("6.43.4.0")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyInformationalVersion("1.0.0")]
 
 namespace ShihabMehediIDM
 {

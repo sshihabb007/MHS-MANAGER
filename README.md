@@ -1,6 +1,6 @@
-# MHS Download Manager (`mdm.exe` v6.43.4)
+# MHS Download Manager (`mdm.exe` v1.0.0)
 
-**MHS Download Manager** is a clean-room, MIT-licensed x64 Windows Download Accelerator (`mdm.exe`) and Manifest V3 Chromium Browser Extension (`extension/`) developed by **Mehedi Hasan Shihab (`sshihabb007`)**.
+**MHS Download Manager** (`v1.0.0`) is a clean-room, MIT-licensed x64 Windows Download Accelerator (`mdm.exe`) and Manifest V3 Chromium Browser Extension (`extension/`) developed by **Mehedi Hasan Shihab (`sshihabb007`)**.
 
 It compiles directly on any standard Windows 10/11 system using the built-in .NET Framework 4.8 C# compiler (`csc.exe`) with **zero external NuGet, DLL, or `ffmpeg` dependencies**.
 
@@ -16,9 +16,9 @@ Prebuilt `mdm.exe` and `MHS-Download-Manager-Portable-x64.zip` bundles are built
 - **Automatic Browser Download Interception (`extension/`)**:
   - Automatically intercepts direct and redirect/tokenized file downloads (`.mkv`, `.mp4`, `.zip`, `R0*`, `R1*`, `.exe`, `.iso`, etc.) via `chrome.downloads` + `Content-Disposition` inspection, cancelling Chrome's built-in download and bringing `Download File Info` to the foreground even when `mdm.exe` is minimized to the system tray.
   - Configurable `Prevent` (`Alt`) and `Force` (`Ins`) hotkeys, wildcard file types, and excluded sites/addresses.
-- **Exact Active Video Tracking, Corner Reloader (`↻`) & Lossless Audio+Video Muxing**:
-  - Floating **"Download this video"** Shadow DOM panel with a built-in **Reloader (`↻`)** button to flush stale streams and re-track the active `<video>` on demand.
-  - FNV-1a media chunk byte fingerprinting (`SourceBuffer.prototype.appendBuffer`) + strict single-group isolation ensure the corner button tracks only the exact playing video on YouTube, Facebook Reels, Instagram Reels/Feed, X, TikTok, and HTML5 players.
+- **Exact Selected-Video Isolation, Compact Corner Icon (`↻`) & Lossless Audio+Video Muxing**:
+  - Sleek icon-first floating Shadow DOM corner widget (`[MHS Icon] [1080p · 4] | [↻] [▾] [×]`) with a built-in **Reloader (`↻`)** button to re-track the selected `<video>` on demand.
+  - Direct `<video>` React Fiber / YouTube `#movie_player` inspection + ISO-BMFF `ftyp`/`moof` FNV-1a MSE chunk fingerprinting + aspect-ratio/duration guards isolate **only** the selected video on multi-video feeds (Facebook, Instagram, YouTube, X, TikTok, Reddit, and HTML5 players) with 100% exact proper video filenames.
   - Displays clean captions/titles, `VIDEO` / `AUDIO` badges, exact resolutions (`2160p`, `1440p`, `1080p`, `720p`, `480p`, `360p`), and combined `Video + Audio` file sizes.
   - Pure C# container inspector & lossless muxer (`MehediMediaMuxer`) merges separate DASH video + audio tracks (`MP4/fMP4 + M4A -> Fast-Start .mp4`, `MP4 + WebM Opus -> .mp4`, `WebM + WebM -> .webm`, `WebM + M4A -> .mkv`) without re-encoding. (DRM/EME-protected streams are strictly respected and never bypassed.)
   - Automatic **Browser Fetch Relay** fallback when session-bound CDN streams return `403 Forbidden` to direct desktop connections.

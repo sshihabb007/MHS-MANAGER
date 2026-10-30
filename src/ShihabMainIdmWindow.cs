@@ -64,7 +64,7 @@ namespace ShihabMehediIDM
             _shihabStartupCli = shihabStartupCli;
             _mehediOpenProgressForms = new Dictionary<string, ShihabDownloadProgressForm>();
 
-            Text = "MHS Download Manager 6.43";
+            Text = "MHS Download Manager 1.0.0";
             Size = new Size(1060, 650);
             MinimumSize = new Size(860, 500);
             StartPosition = FormStartPosition.CenterScreen;
@@ -234,7 +234,7 @@ namespace ShihabMehediIDM
                 mehediTasksMenu, shihabFileMenu, mehediDownloadsMenu, shihabViewMenu, mehediHelpMenu, shihabTopAboutMenu
             });
 
-            // IDM 6.43 Large Outlined Pastel-Neon Toolbar
+            // MHS Download Manager 1.0.0 Large Outlined Pastel-Neon Toolbar
             _mehediToolBar = new ToolStrip
             {
                 GripStyle = ToolStripGripStyle.Hidden,
@@ -438,7 +438,7 @@ namespace ShihabMehediIDM
             _mehediTrayIcon = new NotifyIcon
             {
                 Icon = Icon,
-                Text = "MHS Download Manager 6.43 (mdm.exe)",
+                Text = "MHS Download Manager 1.0.0 (mdm.exe)",
                 Visible = true,
                 ContextMenuStrip = _shihabTrayMenuRef
             };
@@ -1506,9 +1506,9 @@ namespace ShihabMehediIDM
                 "Features active immediately via 127.0.0.1:" + _mehediConfig.MehediLocalBridgePort + " (+ optional Native Messaging):\n" +
                 "• Automatic file download takeover with Cookie + Referer + User-Agent forwarding\n" +
                 "• Hold Alt while clicking any link to bypass capture\n" +
-                "• Floating 'Download this video' corner button on YouTube, Facebook & HTML5 video players\n" +
-                "• Automatic extraction of real video titles & post captions instead of random CDN hashes",
-                "MHS Download Manager — Browser Extension",
+                "• Floating MHS Download corner icon on YouTube, Facebook, Instagram & HTML5 video players\n" +
+                "• Automatic extraction of exact selected-video titles & post captions\n",
+                "MHS Download Manager 1.0.0 — Browser Extension",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
         }

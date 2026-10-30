@@ -23,6 +23,40 @@ document.addEventListener("DOMContentLoaded", async () => {
   const mehediActiveTab = shihabTabs && shihabTabs[0] ? shihabTabs[0] : null;
   const shihabActiveTabId = mehediActiveTab ? mehediActiveTab.id : -1;
 
+  async function mehediResolveIsolatedSelectedStreams(shihabFallbackStreams) {
+    if (shihabActiveTabId >= 0) {
+      try {
+        const mehediDomSel = await chrome.tabs.sendMessage(
+          shihabActiveTabId,
+          { shihabCmd: "mehedi_get_selected_video_streams" },
+          { frameId: 0 }
+        );
+        if (mehediDomSel && mehediDomSel.ok && Array.isArray(mehediDomSel.mehediStreams) && mehediDomSel.mehediStreams.length > 0) {
+          return mehediDomSel.mehediStreams;
+        }
+      } catch (shihabFrameErr) {
+        // Fallback when top frame has no content script (e.g. direct media tab or embedded cross-origin player)
+      }
+    }
+
+    const mehediAll = Array.isArray(shihabFallbackStreams) ? shihabFallbackStreams : [];
+    if (mehediAll.length <= 1) return mehediAll;
+
+    // Isolate strictly to the single freshest groupKey so unrelated videos on the page NEVER mix!
+    let shihabNewestGrp = "";
+    let mehediNewestTs = -1;
+    for (const shihabIt of mehediAll) {
+      if (shihabIt && shihabIt.shihabGroupKey && (shihabIt.shihabDetectedAt || 0) > mehediNewestTs) {
+        mehediNewestTs = shihabIt.shihabDetectedAt || 0;
+        shihabNewestGrp = shihabIt.shihabGroupKey;
+      }
+    }
+    if (shihabNewestGrp) {
+      return mehediAll.filter((mehediIt) => mehediIt && mehediIt.shihabGroupKey === shihabNewestGrp);
+    }
+    return mehediAll.slice(0, 6);
+  }
+
   async function mehediRefreshPopupState() {
     const shihabRes = await chrome.runtime.sendMessage({
       shihabCmd: "shihab_query_tab_streams",
@@ -30,19 +64,28 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     if (!shihabRes || !shihabRes.mehediOnline) {
       shihabDot.classList.remove("online");
-      mehediSub.textContent = "Offline — Launch mdm.exe";
+      mehediSub.textContent = "Offline — Launch mdm.exe v1.0.0";
       shihabToggleBtn.textContent = "Offline";
       return;
     }
 
+    const mehediBridgeVer = (shihabRes.shihabBridgeInfo && shihabRes.shihabBridgeInfo.version) || "1.0.0";
     shihabDot.classList.add("online");
     mehediSub.textContent = shihabRes.shihabEnabled
-      ? "Connected · mdm.exe (MHS Download Manager)"
+      ? `Connected · mdm.exe v${mehediBridgeVer}`
       : "Integration Paused";
     shihabToggleBtn.textContent = shihabRes.shihabEnabled ? "Enabled" : "Paused";
 
-    const mehediStreams = Array.isArray(shihabRes.mehediStreams) ? shihabRes.mehediStreams : [];
+    const mehediStreams = await mehediResolveIsolatedSelectedStreams(shihabRes.mehediStreams);
     mehediCountBadge.textContent = String(mehediStreams.length);
+    if (mehediStreams.length === 0) {
+      shihabStreamsBox.textContent = "";
+      const mehediEmptyDiv = document.createElement("div");
+      mehediEmptyDiv.className = "shihab-empty";
+      mehediEmptyDiv.textContent = "Hover or play the video you want on this tab to capture it with its exact name.";
+      shihabStreamsBox.appendChild(mehediEmptyDiv);
+      return;
+    }
     if (mehediStreams.length > 0) {
       shihabStreamsBox.textContent = "";
       for (const shihabStream of mehediStreams) {

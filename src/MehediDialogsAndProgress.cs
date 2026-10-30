@@ -2184,7 +2184,7 @@ namespace ShihabMehediIDM
 
             Label shihabAppTitle = new Label
             {
-                Text = "MHS Download Manager 6.43",
+                Text = "MHS Download Manager 1.0.0",
                 Location = new Point(108, 18),
                 AutoSize = true,
                 Font = new Font("Segoe UI", 15f, FontStyle.Bold),

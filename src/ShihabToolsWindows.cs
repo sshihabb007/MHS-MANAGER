@@ -971,7 +971,7 @@ namespace ShihabMehediIDM
             {
                 MessageBox.Show(
                     this,
-                    "MHS Download Manager 6.43 Configuration\nDeveloper: Mehedi Hasan Shihab (https://sshihabb007.github.io/)\n\n" +
+                    "MHS Download Manager 1.0.0 Configuration\nDeveloper: Mehedi Hasan Shihab (https://sshihabb007.github.io/)\n\n" +
                     "• General: Browser integration, startup launch, shortcut keys & web player panels\n" +
                     "• File types: Auto-captured extensions (wildcards like R0* supported), site & URL exclusions\n" +
                     "• Save to: Category folders, extensions, server creation/modification dates & temp directory\n" +
@@ -1102,7 +1102,7 @@ namespace ShihabMehediIDM
             using (Form shihabDlg = CreateMehediSubModal("Customize Download Panels in Browsers", new Size(480, 265), mehediDark))
             {
                 Color mehediSurf = ShihabThemePalette.GetShihabSurfaceBg(mehediDark);
-                CheckBox shihabShowChk = new CheckBox { Text = "Show floating 'Download this video' panel on web players", Location = new Point(18, 20), AutoSize = true, Checked = shihabShowPanel };
+                CheckBox shihabShowChk = new CheckBox { Text = "Show floating MHS video download icon on web players", Location = new Point(18, 20), AutoSize = true, Checked = shihabShowPanel };
                 CheckBox mehediMiniChk = new CheckBox { Text = "Mini mode (compact corner download badge)", Location = new Point(18, 52), AutoSize = true, Checked = mehediMiniMode };
                 CheckBox shihabSkipChk = new CheckBox { Text = "Don't start downloading from web players automatically", Location = new Point(18, 84), AutoSize = true, Checked = shihabSkipAutoStart };
                 Label mehediMinLbl = new Label { Text = "Minimum video size to show panel (KB):", Location = new Point(18, 122), AutoSize = true };
@@ -1967,7 +1967,7 @@ namespace ShihabMehediIDM
                 try
                 {
                     HttpWebRequest shihabReq = (HttpWebRequest)WebRequest.Create(shihabNode.Key);
-                    shihabReq.UserAgent = "Mozilla/5.0 ShihabMehediIDM-Grabber/6.43";
+                    shihabReq.UserAgent = "Mozilla/5.0 ShihabMehediIDM-Grabber/1.0.0";
                     shihabReq.Timeout = 10000;
                     using (HttpWebResponse mehediResp = (HttpWebResponse)shihabReq.GetResponse())
                     using (StreamReader shihabSr = new StreamReader(mehediResp.GetResponseStream(), Encoding.UTF8))

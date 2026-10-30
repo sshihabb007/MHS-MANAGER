@@ -23,15 +23,20 @@
   let mehediShadowHost = null;
   let shihabRefs = null;
   let shihabDropdownOpen = false;
+  let mehediLockedDropdownVideoEl = null;
   let mehediHoveredVideoEl = null;
+  let mehediLastSelectedVideoEl = null;
   let shihabHoveredUntilMs = 0;
   let mehediLastBgSyncMs = 0;
   let shihabToastClearTimer = null;
   let mehediPeriodicTimerId = null;
   let shihabDomObserver = null;
   let mehediLastObservedPageHref = location.href;
+  let shihabLocalVidUidCounter = 1;
 
-  // Live bindings from mehedi_page_hook.js (byte-exact MSE blob -> stream URLs, fallback blob -> URLs, shortcode/altId -> groupKey & caption)
+  // Live bindings from mehedi_page_hook.js (direct DOM <video> fiber identity, byte-exact MSE blob -> URLs, shortcode/altId -> groupKey & caption)
+  const shihabVidUidIdentityMap = new Map();
+  const mehediVidLastInspectMs = new WeakMap();
   const shihabExactBlobToStreamUrlsMap = new Map();
   const shihabBlobToStreamUrlsMap = new Map();
   const mehediShortcodeMetaMap = new Map();
@@ -110,12 +115,20 @@
         const shihabPadded = mehediB64 + "=".repeat((4 - (mehediB64.length % 4)) % 4);
         const mehediObj = JSON.parse(atob(shihabPadded));
         if (mehediObj && typeof mehediObj === "object") {
-          for (const shihabField of ["xpv_asset_id", "video_id", "asset_id"]) {
-            if (mehediObj[shihabField]) {
-              const mehediStr = String(mehediObj[shihabField]);
-              if (!shihabAltIds.includes(mehediStr)) shihabAltIds.push(mehediStr);
-              if (!mehediGroupKey) mehediGroupKey = mehediStr;
-            }
+          const shihabXpv = mehediObj.xpv_asset_id ? String(mehediObj.xpv_asset_id) : "";
+          const mehediVidId = mehediObj.video_id ? String(mehediObj.video_id) : "";
+          const shihabAstId = mehediObj.asset_id ? String(mehediObj.asset_id) : "";
+          if (shihabXpv) {
+            mehediGroupKey = `asset:${shihabXpv}`;
+            shihabAltIds.push(shihabXpv, mehediGroupKey);
+          }
+          if (mehediVidId) {
+            if (!mehediGroupKey) mehediGroupKey = `vid:${mehediVidId}`;
+            shihabAltIds.push(mehediVidId, `vid:${mehediVidId}`);
+          }
+          if (shihabAstId) {
+            if (!mehediGroupKey) mehediGroupKey = `asset:${shihabAstId}`;
+            shihabAltIds.push(shihabAstId, `asset:${shihabAstId}`);
           }
         }
       }
@@ -139,7 +152,25 @@
     }
   }
 
-  // Receive real-time MSE blob bindings & manifest stream metadata from mehedi_page_hook.js
+  function mehediEnsureVideoUidAndInspect(shihabVidEl, mehediForceInspect) {
+    if (!shihabVidEl || shihabVidEl.tagName !== "VIDEO") return "";
+    if (!shihabVidEl.dataset.shihabVidUid) {
+      shihabVidEl.dataset.shihabVidUid =
+        "shihab_c_" + (shihabLocalVidUidCounter++) + "_" + Math.random().toString(36).slice(2, 7);
+    }
+    const mehediUid = shihabVidEl.dataset.shihabVidUid;
+    const shihabNow = Date.now();
+    const mehediLastMs = mehediVidLastInspectMs.get(shihabVidEl) || 0;
+    if (mehediForceInspect || (!shihabVidUidIdentityMap.has(mehediUid) && shihabNow - mehediLastMs > 1400)) {
+      mehediVidLastInspectMs.set(shihabVidEl, shihabNow);
+      try {
+        window.postMessage({ __shihabInspectVideoUid: mehediUid }, "*");
+      } catch (_) {}
+    }
+    return mehediUid;
+  }
+
+  // Receive real-time MSE blob bindings, direct <video> fiber identities & manifest stream metadata from mehedi_page_hook.js
   function mehediOnPageHookWindowMessage(shihabEvent) {
     if (shihabEvent.source !== window || !shihabEvent.data || shihabEvent.data.__shihabMehediPageHook !== true) {
       return;
@@ -147,6 +178,52 @@
     const mehediKind = shihabEvent.data.mehediKind;
     const shihabPayload = shihabEvent.data.shihabPayload;
     if (!shihabPayload) return;
+
+    if (mehediKind === "shihab_video_element_identity") {
+      const mehediVidUid = String(shihabPayload.shihabVidUid || "");
+      if (mehediVidUid) {
+        const shihabPrevIdent = shihabVidUidIdentityMap.get(mehediVidUid) || {
+          mehediGroupKeys: [],
+          shihabAltIds: [],
+          mehediBoundUrls: [],
+          shihabTitleHint: ""
+        };
+        const mehediMergedGroups = Array.from(new Set([
+          ...shihabPrevIdent.mehediGroupKeys,
+          ...(Array.isArray(shihabPayload.mehediGroupKeys) ? shihabPayload.mehediGroupKeys.map(String) : [])
+        ].filter(Boolean)));
+        const shihabMergedAlts = Array.from(new Set([
+          ...shihabPrevIdent.shihabAltIds,
+          ...(Array.isArray(shihabPayload.shihabAltIds) ? shihabPayload.shihabAltIds.map(String) : [])
+        ].filter(Boolean)));
+        const mehediMergedUrls = Array.from(new Set([
+          ...shihabPrevIdent.mehediBoundUrls,
+          ...(Array.isArray(shihabPayload.mehediBoundUrls)
+            ? shihabPayload.mehediBoundUrls.map(mehediNormalizeClientStreamUrl)
+            : [])
+        ].filter(Boolean)));
+        const shihabTitleHint = String(shihabPayload.shihabTitleHint || shihabPrevIdent.shihabTitleHint || "");
+
+        shihabVidUidIdentityMap.set(mehediVidUid, {
+          mehediGroupKeys: mehediMergedGroups,
+          shihabAltIds: shihabMergedAlts,
+          mehediBoundUrls: mehediMergedUrls,
+          shihabTitleHint
+        });
+        if (shihabVidUidIdentityMap.size > 120) {
+          const mehediOldUid = shihabVidUidIdentityMap.keys().next().value;
+          shihabVidUidIdentityMap.delete(mehediOldUid);
+        }
+        for (const mehediGrp of mehediMergedGroups) {
+          if (shihabTitleHint) shihabGroupKeyTitleMap.set(mehediGrp, shihabTitleHint);
+          for (const shihabAlt of shihabMergedAlts) {
+            mehediIndexIdentifierToGroup(shihabAlt, mehediGrp, shihabTitleHint);
+          }
+        }
+        shihabRenderFloatingIdmVideoPanel();
+      }
+      return;
+    }
 
     if (mehediKind === "shihab_mse_blob_binding") {
       const mehediBlobUrl = String(shihabPayload.shihabBlobUrl || "");
@@ -228,12 +305,30 @@
     }
   }
 
-  // Clean and validate candidate video caption / title text (supports Unicode / Bengali / English / Emoji & strips translation buttons)
+  function shihabIsGibberishStreamFileLeaf(mehediLeaf) {
+    if (!mehediLeaf) return true;
+    const shihabStem = String(mehediLeaf).split(/[\\/]/).pop().replace(/\.[a-z0-9]{2,5}$/i, "").trim();
+    if (!shihabStem || shihabStem.length < 3) return true;
+    if (/^(video|videoplayback|playback|media|master|index|playlist|chunklist|manifest|stream|download|file|watch|reel|reels|audio|clip)$/i.test(shihabStem)) {
+      return true;
+    }
+    if (/^(AQ[A-Za-z0-9_-]{8,}|An[A-Za-z0-9_-]{8,}|[0-9]{6,}_[0-9]{6,}[0-9_a-z]*|[0-9a-f-]{16,})$/i.test(shihabStem)) {
+      return true;
+    }
+    if (!/\s/.test(shihabStem) && shihabStem.length >= 22 && /^[A-Za-z0-9_-]+$/.test(shihabStem)) {
+      const mehediTrans = (shihabStem.match(/[a-z][A-Z]|[A-Z][a-z][0-9]|[0-9][A-Za-z]/g) || []).length;
+      if (mehediTrans >= 3) return true;
+    }
+    return false;
+  }
+
+  // Clean and validate candidate video caption / title text (supports Unicode / Bengali / English / Emoji & strips translation/feed noise)
   function mehediCleanCaptionText(shihabRaw) {
     if (!shihabRaw) return "";
     let mehediTxt = String(shihabRaw)
       .replace(/^\(\d+\+?\)\s*/, "")
       .replace(/^[▶►•·\s]+/, "")
+      .replace(/^(?:Suggested for you|Sponsored|Reels)\s*[·•\-]?\s*/gi, "")
       .replace(/\s*(?:[|\-·•—:]\s*(?:Facebook|Watch|Reels|YouTube|Instagram|TikTok|X|Twitter|Reddit|Vimeo|Dailymotion|Twitch))+\s*$/gi, "")
       .replace(/\s*(?:Hide translation|See translation|See original|Translated from [A-Za-z ]+)\s*$/gi, "")
       .replace(/\b(?:Hide translation|See translation|See original)\s*$/gi, "")
@@ -245,11 +340,11 @@
       .trim();
 
     if (mehediTxt.length < 2) return "";
-    const shihabUiNoise = /^(facebook|reels?|watch|youtube|instagram|tiktok|x|twitter|reddit|home|explore|notifications|messages|chats|menu|profile|search|like|likes|comment|comments|share|save|send|follow|following|sponsored|suggested for you|original audio|audio is muted|muted|mute|unmute|play|pause|live|more|verified|see translation|hide translation|see original|translate|add a comment\.{0,3}|view all \d* ?comments|\d+\s*(?:w|d|h|m|s|hrs?|mins?|secs?|days?|weeks?|likes?|views?|comments?)|\d+:\d+(?:\s*\/\s*\d+:\d+)?|\d+(?:[.,]\d+)?[kmb]?)$/i;
+    const shihabUiNoise = /^(facebook|reels?|watch|youtube|instagram|tiktok|x|twitter|reddit|home|explore|notifications|messages|chats|menu|profile|search|like|likes|comment|comments|share|save|send|follow|following|sponsored|suggested for you|original audio|audio is muted|muted|mute|unmute|play|pause|live|more|verified|see translation|hide translation|see original|translate|add a comment\.{0,3}|view all \d* ?comments|yesterday(?:\s+at\s+.*)?|just now|\d+\s*(?:w|d|h|m|s|hrs?|mins?|secs?|days?|weeks?|months?|years?|likes?|views?|comments?)(?:\s+ago)?|\d+:\d+(?:\s*\/\s*\d+:\d+)?|\d+(?:[.,]\d+)?[kmb]?)$/i;
     if (shihabUiNoise.test(mehediTxt)) {
       return "";
     }
-    if (/^liked by\s+\S+/i.test(mehediTxt)) {
+    if (/^(?:liked by\s+\S+|suggested for you\b)/i.test(mehediTxt)) {
       return "";
     }
     if (mehediTxt.length > 105) {
@@ -258,19 +353,19 @@
     return mehediTxt;
   }
 
-  // Locate the single-post / single-player DOM card enclosing a specific <video>
+  // Locate the single-post / single-player DOM card enclosing a specific <video> (strictly 1 <video> max so adjacent feed posts NEVER bleed!)
   function shihabFindScopedCardForVideo(mehediVid, shihabMaxVideosAllowed) {
     if (!mehediVid) return null;
     const mehediAllowed = shihabMaxVideosAllowed || 1;
-    const shihabSemanticArticle = mehediVid.closest("article, shreddit-post, ytd-reel-video-renderer, [data-testid='tweet']");
-    if (shihabSemanticArticle && shihabSemanticArticle.querySelectorAll("video").length <= Math.max(2, mehediAllowed)) {
+    const shihabSemanticArticle = mehediVid.closest("article, shreddit-post, ytd-reel-video-renderer, [data-testid='tweet'], [role='article']");
+    if (shihabSemanticArticle && shihabSemanticArticle.querySelectorAll("video").length <= mehediAllowed) {
       return shihabSemanticArticle;
     }
 
     let mehediBestCard = null;
     let shihabCur = mehediVid.parentElement;
-    for (let mehediDepth = 0; shihabCur && shihabCur !== document.body && shihabCur !== document.documentElement && mehediDepth < 15; mehediDepth++) {
-      if (shihabCur.tagName === "MAIN") break;
+    for (let mehediDepth = 0; shihabCur && shihabCur !== document.body && shihabCur !== document.documentElement && mehediDepth < 16; mehediDepth++) {
+      if (shihabCur.tagName === "MAIN" || shihabCur.getAttribute("role") === "feed" || shihabCur.getAttribute("role") === "main") break;
       const shihabVidCount = shihabCur.querySelectorAll("video").length;
       if (shihabVidCount > mehediAllowed) break;
       mehediBestCard = shihabCur;
@@ -307,20 +402,53 @@
     }
   }
 
-  // Resolve exact identity keys (byte-exact MSE blob URLs, route/card shortcodes & altIds, asset groupKeys) for a specific <video>
+  // Resolve exact identity keys (direct DOM React Fiber / player binding, byte-exact MSE blob URLs, route/card shortcodes & asset groupKeys)
   function shihabResolveVideoContext(mehediVid) {
+    const shihabDirectDomGroupKeys = new Set();
     const shihabExactBoundUrls = new Set();
     const shihabExactGroupKeys = new Set();
     const shihabBoundUrls = new Set();
     const mehediFallbackBlobGroupKeys = new Set();
     const mehediRouteAndCardGroupKeys = new Set();
     const shihabShortcodes = new Set();
+    let mehediDirectFiberTitleHint = "";
 
     const mehediHost = (location.hostname || "").toLowerCase();
     const shihabPath = location.pathname || "";
 
-    // 1. Direct or MSE blob: currentSrc binding (Exact FNV-1a byte-matched bindings take highest priority!)
+    // 0. Direct DOM <video> React Fiber / YouTube #movie_player binding (100% specific to this exact <video> node!)
     if (mehediVid) {
+      const shihabVidUid = mehediEnsureVideoUidAndInspect(mehediVid, false);
+      const mehediIdent = shihabVidUid ? shihabVidUidIdentityMap.get(shihabVidUid) : null;
+      if (mehediIdent) {
+        if (mehediIdent.shihabTitleHint) {
+          mehediDirectFiberTitleHint = mehediIdent.shihabTitleHint;
+        }
+        for (const shihabG of mehediIdent.mehediGroupKeys) {
+          if (shihabG) shihabDirectDomGroupKeys.add(shihabG);
+        }
+        for (const mehediAlt of mehediIdent.shihabAltIds) {
+          if (mehediAlt) shihabShortcodes.add(String(mehediAlt));
+        }
+        if (mehediIdent.mehediBoundUrls && mehediIdent.mehediBoundUrls.length > 0) {
+          mehediMapBoundUrlsToGroups(mehediIdent.mehediBoundUrls, shihabDirectDomGroupKeys, shihabExactBoundUrls);
+          for (const shihabBu of shihabExactBoundUrls) shihabBoundUrls.add(shihabBu);
+        }
+        // Cross-check fiber altIds against shihabTabStreamsCache
+        for (const shihabAlt of mehediIdent.shihabAltIds) {
+          for (const mehediCached of shihabTabStreamsCache) {
+            if (!mehediCached || !mehediCached.shihabGroupKey) continue;
+            if (
+              mehediCached.shihabGroupKey === shihabAlt ||
+              (Array.isArray(mehediCached.mehediAltIds) && mehediCached.mehediAltIds.includes(shihabAlt))
+            ) {
+              shihabDirectDomGroupKeys.add(mehediCached.shihabGroupKey);
+            }
+          }
+        }
+      }
+
+      // 1. Direct or MSE blob: currentSrc binding (Exact FNV-1a ftyp/moof byte-matched bindings take priority over fallback)
       const shihabRawSrc = mehediVid.currentSrc || mehediVid.src || "";
       if (shihabRawSrc.startsWith("blob:")) {
         const mehediExactSet = shihabExactBlobToStreamUrlsMap.get(shihabRawSrc);
@@ -369,12 +497,13 @@
         const shihabWatchVid = new URLSearchParams(location.search).get("v") || "";
         if (/^\d{5,}$/.test(shihabWatchVid)) {
           shihabShortcodes.add(shihabWatchVid);
+          shihabShortcodes.add(`vid:${shihabWatchVid}`);
         }
       }
     }
 
-    // 3. Permalink links inside this specific <video>'s feed card (Instagram feed, Facebook feed, X feed, YouTube Shorts)
-    const mehediCardRoot = shihabFindScopedCardForVideo(mehediVid, mehediHost.includes("facebook.com") ? 2 : 1);
+    // 3. Permalink links inside this specific <video>'s single-video feed card (strictly max 1 <video> per card!)
+    const mehediCardRoot = shihabFindScopedCardForVideo(mehediVid, 1);
     if (mehediCardRoot) {
       const shihabCardAnchors = mehediCardRoot.querySelectorAll("a[href]");
       for (const mehediAnchor of shihabCardAnchors) {
@@ -382,9 +511,17 @@
         const mehediCodeMatch = shihabHref.match(/\/(?:reel|reels|p|tv|videos|status|shorts)\/([A-Za-z0-9_-]+)/i);
         if (mehediCodeMatch && mehediCodeMatch[1] && !/^(?:home|feed|audio)$/i.test(mehediCodeMatch[1])) {
           shihabShortcodes.add(mehediCodeMatch[1]);
+          if (/^\d{5,}$/.test(mehediCodeMatch[1])) {
+            shihabShortcodes.add(`vid:${mehediCodeMatch[1]}`);
+          }
           if (mehediHost.includes("x.com") || mehediHost.includes("twitter.com")) {
             mehediRouteAndCardGroupKeys.add(`tw:${mehediCodeMatch[1]}`);
           }
+        }
+        const shihabWatchHrefMatch = shihabHref.match(/[?&]v=(\d{5,})/);
+        if (shihabWatchHrefMatch && shihabWatchHrefMatch[1]) {
+          shihabShortcodes.add(shihabWatchHrefMatch[1]);
+          shihabShortcodes.add(`vid:${shihabWatchHrefMatch[1]}`);
         }
       }
     }
@@ -408,18 +545,32 @@
     }
 
     const mehediGroupKeys = new Set([
+      ...shihabDirectDomGroupKeys,
       ...shihabExactGroupKeys,
       ...mehediRouteAndCardGroupKeys,
       ...mehediFallbackBlobGroupKeys
     ]);
 
-    // Resolve any manifest-extracted titleHint for this exact video (preferring exact/route group keys first!)
-    let shihabManifestTitleHint = "";
-    for (const mehediGrp of mehediGroupKeys) {
-      const shihabHint = shihabGroupKeyTitleMap.get(mehediGrp);
-      if (shihabHint) {
-        shihabManifestTitleHint = shihabHint;
-        break;
+    // Resolve manifest/fiber titleHint strictly for this exact video's group
+    let shihabManifestTitleHint = mehediDirectFiberTitleHint || "";
+    if (!shihabManifestTitleHint) {
+      for (const mehediGrp of mehediGroupKeys) {
+        const shihabHint = shihabGroupKeyTitleMap.get(mehediGrp);
+        if (shihabHint) {
+          shihabManifestTitleHint = shihabHint;
+          break;
+        }
+      }
+    }
+    if (!shihabManifestTitleHint) {
+      for (const mehediGrp of mehediGroupKeys) {
+        const shihabStreamWithHint = shihabTabStreamsCache.find(
+          (mehediRec) => mehediRec && mehediRec.shihabGroupKey === mehediGrp && Boolean(mehediRec.shihabTitleHint)
+        );
+        if (shihabStreamWithHint) {
+          shihabManifestTitleHint = shihabStreamWithHint.shihabTitleHint;
+          break;
+        }
       }
     }
     if (!shihabManifestTitleHint) {
@@ -434,6 +585,7 @@
 
     return {
       mehediCardRoot,
+      shihabDirectDomGroupKeys,
       shihabExactBoundUrls,
       shihabExactGroupKeys,
       shihabBoundUrls,
@@ -445,14 +597,29 @@
     };
   }
 
-  // Extract real video name or social post/Reel caption for Instagram, YouTube, Facebook, X, TikTok, Reddit & HTML5 players
-  function shihabExtractBestVideoTitle(mehediTargetVideo) {
+  // Extract 100% exact video name or scoped post/Reel caption for the selected <video> ONLY (never bleeding from sibling feed videos!)
+  function shihabExtractBestVideoTitle(mehediTargetVideo, mehediPrimaryStream) {
     const shihabHost = (location.hostname || "").toLowerCase();
     const mehediVid = mehediTargetVideo || mehediFindPrimaryVisibleVideo();
+    const shihabIsMultiVideoFeed = shihabCollectAllVideosDeep(document, []).length > 1;
     const shihabCtx = shihabResolveVideoContext(mehediVid);
+
+    // 0. If the stream URL itself carries a genuine human-readable filename (e.g. direct MP4/MKV host), keep it ready
+    let mehediHumanStreamLeaf = "";
+    const shihabProbeStreamUrl = (mehediPrimaryStream && mehediPrimaryStream.shihabStreamUrl) ||
+      (mehediVid && (mehediVid.currentSrc || mehediVid.src) && /^https?:/i.test(mehediVid.currentSrc || mehediVid.src) ? (mehediVid.currentSrc || mehediVid.src) : "");
+    if (shihabProbeStreamUrl) {
+      try {
+        const mehediRawLeaf = decodeURIComponent(new URL(shihabProbeStreamUrl, location.href).pathname.split("/").pop() || "");
+        if (mehediRawLeaf.includes(".") && !shihabIsGibberishStreamFileLeaf(mehediRawLeaf)) {
+          mehediHumanStreamLeaf = mehediCleanCaptionText(mehediRawLeaf.replace(/\.[a-z0-9]{2,5}$/i, ""));
+        }
+      } catch (_) {}
+    }
 
     // 1. YouTube Watch & Shorts
     if (shihabHost.includes("youtube.com") || shihabHost.includes("youtu.be")) {
+      const mehediHintClean = mehediCleanCaptionText(shihabCtx.shihabManifestTitleHint);
       const mehediYtSelectors = location.pathname.startsWith("/shorts/")
         ? [
             "ytd-reel-video-renderer[is-active] h2",
@@ -469,13 +636,14 @@
         const shihabCandidate = mehediCleanCaptionText(mehediEl ? mehediEl.textContent : "");
         if (shihabCandidate) return shihabCandidate;
       }
-      const mehediHintClean = mehediCleanCaptionText(shihabCtx.shihabManifestTitleHint);
       if (mehediHintClean) return mehediHintClean;
-      const shihabDocClean = mehediCleanCaptionText(document.title);
-      if (shihabDocClean) return shihabDocClean;
+      if (!shihabIsMultiVideoFeed) {
+        const shihabDocClean = mehediCleanCaptionText(document.title);
+        if (shihabDocClean) return shihabDocClean;
+      }
     }
 
-    // 2. Instagram Home Feed, Reels, Posts & Stories (strictly scoped to the hovered/active post card!)
+    // 2. Instagram Home Feed, Reels, Posts & Stories (strictly scoped to the selected <video>'s fiber/manifest & single-video card!)
     if (shihabHost.includes("instagram.com")) {
       const mehediHintIg = mehediCleanCaptionText(shihabCtx.shihabManifestTitleHint);
       if (mehediHintIg) return mehediHintIg;
@@ -536,73 +704,74 @@
         }
       }
 
-      if (mehediAuthorHandle && shihabBestCaption) {
-        if (shihabBestCaption.toLowerCase().startsWith(mehediAuthorHandle.toLowerCase())) {
-          return shihabBestCaption.slice(0, 105);
-        }
-        return `${mehediAuthorHandle} - ${shihabBestCaption}`.slice(0, 105).trim();
-      }
-      if (shihabBestCaption) return shihabBestCaption;
+      if (shihabBestCaption) return shihabBestCaption.slice(0, 105).trim();
       if (mehediAuthorHandle) {
         const shihabFirstCode = shihabCtx.shihabShortcodes.values().next().value || "";
-        return shihabFirstCode ? `${mehediAuthorHandle} - ${shihabFirstCode}` : `${mehediAuthorHandle} - Instagram Reel`;
+        return shihabFirstCode ? `${mehediAuthorHandle} - ${shihabFirstCode}` : `${mehediAuthorHandle} - Instagram Video`;
       }
 
-      const mehediOgIg = document.querySelector('meta[property="og:title"]');
-      const shihabOgIgClean = mehediCleanCaptionText(mehediOgIg ? mehediOgIg.getAttribute("content") : "");
-      if (shihabOgIgClean) return shihabOgIgClean;
+      if (!shihabIsMultiVideoFeed) {
+        const mehediOgIg = document.querySelector('meta[property="og:title"]');
+        const shihabOgIgClean = mehediCleanCaptionText(mehediOgIg ? mehediOgIg.getAttribute("content") : "");
+        if (shihabOgIgClean) return shihabOgIgClean;
+      }
 
       const mehediCodeFallback = shihabCtx.shihabShortcodes.values().next().value || "";
-      if (mehediCodeFallback) return `Instagram Reel ${mehediCodeFallback}`;
+      if (mehediCodeFallback) return `Instagram Video ${mehediCodeFallback}`;
     }
 
-    // 3. Facebook Reels, Watch & Feed Videos
+    // 3. Facebook Reels, Watch & Feed Videos (NEVER query document-wide on multi-video feeds!)
     if (shihabHost.includes("facebook.com") || shihabHost.includes("fb.watch")) {
       const mehediFbHint = mehediCleanCaptionText(shihabCtx.shihabManifestTitleHint);
       const shihabFbCard = shihabCtx.mehediCardRoot;
-      const mehediSearchScopes = shihabFbCard ? [shihabFbCard, document] : [document];
 
-      for (const shihabScope of mehediSearchScopes) {
+      if (shihabFbCard) {
         const mehediMsgSelectors = [
           '[data-ad-preview="message"]',
           '[data-ad-comet-preview="message"]',
           '[data-testid="post_message"]'
         ];
         for (const shihabSel of mehediMsgSelectors) {
-          const mehediEl = shihabScope.querySelector(shihabSel);
+          const mehediEl = shihabFbCard.querySelector(shihabSel);
           const shihabCap = mehediCleanCaptionText(mehediEl ? mehediEl.textContent : "");
           if (shihabCap) return shihabCap;
         }
+      }
 
-        if (shihabScope !== document) {
-          const mehediAutoDirs = shihabScope.querySelectorAll('div[dir="auto"], span[dir="auto"]');
-          let shihabBestFbCap = "";
-          let mehediFbAuthor = "";
-          for (const shihabNode of mehediAutoDirs) {
-            if (shihabNode.closest("nav, [role='banner'], [role='navigation'], button, [role='button']")) continue;
-            const mehediRect = shihabNode.getBoundingClientRect();
-            if (mehediRect.width < 10 || mehediRect.height < 8) continue;
-            const shihabClean = mehediCleanCaptionText(shihabNode.textContent || "");
-            if (!shihabClean) continue;
-            if (shihabNode.closest("h2, h3, strong, a[role='link']") && !mehediFbAuthor && shihabClean.length <= 45) {
-              mehediFbAuthor = shihabClean;
-              continue;
-            }
-            if (shihabClean.length >= 4 && shihabClean.length > shihabBestFbCap.length) {
-              shihabBestFbCap = shihabClean;
-            }
+      if (mehediFbHint) return mehediFbHint;
+
+      if (shihabFbCard) {
+        const mehediAutoDirs = shihabFbCard.querySelectorAll('div[dir="auto"], span[dir="auto"]');
+        let shihabBestFbCap = "";
+        let mehediFbAuthor = "";
+        for (const shihabNode of mehediAutoDirs) {
+          if (shihabNode.closest("nav, [role='banner'], [role='navigation'], button, [role='button']")) continue;
+          if (shihabNode.querySelectorAll('div[dir="auto"], span[dir="auto"]').length > 2) continue;
+          const mehediRect = shihabNode.getBoundingClientRect();
+          if (mehediRect.width < 10 || mehediRect.height < 8) continue;
+          const shihabClean = mehediCleanCaptionText(shihabNode.textContent || "");
+          if (!shihabClean) continue;
+          if (shihabNode.closest("h2, h3, strong, a[role='link']") && !mehediFbAuthor && shihabClean.length <= 45) {
+            mehediFbAuthor = shihabClean;
+            continue;
           }
-          if (shihabBestFbCap) return mehediFbAuthor ? `${mehediFbAuthor} - ${shihabBestFbCap}`.slice(0, 105) : shihabBestFbCap;
-          if (mehediFbHint) return mehediFbHint;
-          if (mehediFbAuthor) {
-            const shihabReelId = shihabCtx.shihabShortcodes.values().next().value || "";
-            return shihabReelId ? `${mehediFbAuthor} - Reel ${shihabReelId}` : `${mehediFbAuthor} - Facebook Video`;
+          if (shihabClean.length >= 4 && shihabClean.length > shihabBestFbCap.length) {
+            shihabBestFbCap = shihabClean;
           }
         }
+        if (shihabBestFbCap) return shihabBestFbCap;
+        if (mehediFbAuthor) {
+          const shihabReelId = Array.from(shihabCtx.shihabShortcodes).find((mehediS) => !mehediS.includes(":")) || "";
+          return shihabReelId ? `${mehediFbAuthor} - ${shihabReelId}` : `${mehediFbAuthor} - Facebook Video`;
+        }
       }
-      if (mehediFbHint) return mehediFbHint;
-      const shihabDocFb = mehediCleanCaptionText(document.title);
-      if (shihabDocFb) return shihabDocFb;
+
+      if (!shihabIsMultiVideoFeed) {
+        const shihabDocFb = mehediCleanCaptionText(document.title);
+        if (shihabDocFb) return shihabDocFb;
+      }
+      const mehediFbIdFallback = Array.from(shihabCtx.shihabShortcodes).find((shihabS) => !shihabS.includes(":")) || "";
+      if (mehediFbIdFallback) return `Facebook Video ${mehediFbIdFallback}`;
     }
 
     // 4. X / Twitter
@@ -614,7 +783,6 @@
         const shihabTweetClean = mehediCleanCaptionText(shihabTweetTxtEl ? shihabTweetTxtEl.textContent : "");
         const mehediHandleMatch = (mehediUserEl ? mehediUserEl.textContent : "").match(/@([A-Za-z0-9_]{1,20})/);
         const shihabHandle = mehediHandleMatch ? mehediHandleMatch[1] : "";
-        if (shihabHandle && shihabTweetClean) return `${shihabHandle} - ${shihabTweetClean}`.slice(0, 105);
         if (shihabTweetClean) return shihabTweetClean;
         if (shihabHandle) return `${shihabHandle} - X Video`;
       }
@@ -624,18 +792,20 @@
 
     // 5. TikTok
     if (shihabHost.includes("tiktok.com")) {
-      const mehediTtScope = shihabCtx.mehediCardRoot || document;
-      const shihabDescEl = mehediTtScope.querySelector('[data-e2e="browse-video-desc"], [data-e2e="video-desc"], [data-e2e="new-desc-span"]');
-      const mehediAuthorEl = mehediTtScope.querySelector('[data-e2e="video-author-uniqueid"], [data-e2e="browse-username"]');
-      const shihabDescClean = mehediCleanCaptionText(shihabDescEl ? shihabDescEl.textContent : "");
-      const mehediAuthorClean = mehediCleanCaptionText(mehediAuthorEl ? mehediAuthorEl.textContent : "");
-      if (mehediAuthorClean && shihabDescClean) return `${mehediAuthorClean} - ${shihabDescClean}`.slice(0, 105);
-      if (shihabDescClean) return shihabDescClean;
+      const mehediTtScope = shihabCtx.mehediCardRoot || (!shihabIsMultiVideoFeed ? document : null);
+      if (mehediTtScope) {
+        const shihabDescEl = mehediTtScope.querySelector('[data-e2e="browse-video-desc"], [data-e2e="video-desc"], [data-e2e="new-desc-span"]');
+        const mehediAuthorEl = mehediTtScope.querySelector('[data-e2e="video-author-uniqueid"], [data-e2e="browse-username"]');
+        const shihabDescClean = mehediCleanCaptionText(shihabDescEl ? shihabDescEl.textContent : "");
+        const mehediAuthorClean = mehediCleanCaptionText(mehediAuthorEl ? mehediAuthorEl.textContent : "");
+        if (shihabDescClean) return shihabDescClean;
+        if (mehediAuthorClean) return `${mehediAuthorClean} - TikTok Video`;
+      }
     }
 
     // 6. Reddit
     if (shihabHost.includes("reddit.com")) {
-      const mehediPostEl = mehediVid ? mehediVid.closest("shreddit-post") : document.querySelector("shreddit-post");
+      const mehediPostEl = mehediVid ? mehediVid.closest("shreddit-post") : (!shihabIsMultiVideoFeed ? document.querySelector("shreddit-post") : null);
       if (mehediPostEl) {
         const shihabPostTitle = mehediCleanCaptionText(mehediPostEl.getAttribute("post-title") || "");
         if (shihabPostTitle) return shihabPostTitle;
@@ -647,9 +817,10 @@
       }
     }
 
-    // 7. Universal Manifest Hint + Scoped HTML5 / Vimeo / Dailymotion / News / Course Players
+    // 7. Universal Manifest Hint + Genuine Stream Filename + Scoped HTML5 / Course / News Players
     const mehediGenericHint = mehediCleanCaptionText(shihabCtx.shihabManifestTitleHint);
     if (mehediGenericHint) return mehediGenericHint;
+    if (mehediHumanStreamLeaf) return mehediHumanStreamLeaf;
 
     if (mehediVid) {
       const shihabVidAttr = mehediCleanCaptionText(
@@ -674,16 +845,18 @@
       }
     }
 
-    const mehediOg = document.querySelector('meta[property="og:title"], meta[name="twitter:title"]');
-    const shihabOgTxt = mehediCleanCaptionText(mehediOg ? mehediOg.getAttribute("content") : "");
-    if (shihabOgTxt) return shihabOgTxt;
+    if (!shihabIsMultiVideoFeed) {
+      const mehediOg = document.querySelector('meta[property="og:title"], meta[name="twitter:title"]');
+      const shihabOgTxt = mehediCleanCaptionText(mehediOg ? mehediOg.getAttribute("content") : "");
+      if (shihabOgTxt) return shihabOgTxt;
 
-    const mehediH1 = document.querySelector("h1");
-    const shihabH1Txt = mehediCleanCaptionText(mehediH1 ? mehediH1.textContent : "");
-    if (shihabH1Txt) return shihabH1Txt;
+      const mehediH1 = document.querySelector("h1");
+      const shihabH1Txt = mehediCleanCaptionText(mehediH1 ? mehediH1.textContent : "");
+      if (shihabH1Txt) return shihabH1Txt;
 
-    const mehediDocFallback = mehediCleanCaptionText(document.title);
-    if (mehediDocFallback) return mehediDocFallback;
+      const mehediDocFallback = mehediCleanCaptionText(document.title);
+      if (mehediDocFallback) return mehediDocFallback;
+    }
 
     const shihabSiteSlug = shihabHost.replace(/^www\./i, "").split(".")[0] || "Web";
     return shihabSiteSlug.charAt(0).toUpperCase() + shihabSiteSlug.slice(1) + " Video";
@@ -774,12 +947,16 @@
       shihabExt: shihabExtGuess,
       mehediMediaKind: mehediIsAud ? "AUDIO" : "VIDEO",
       mehediTrackRole: shihabEntryObj.mehediTrackRole || (mehediIsAud ? "audio" : "progressive"),
+      shihabWidth: Number(shihabEntryObj.shihabWidth || 0),
+      mehediHeight: Number(shihabEntryObj.mehediHeight || 0),
+      mehediDurationSec: Number(shihabEntryObj.mehediDurationSec || 0),
       shihabResolution: mehediRes,
       shihabQualityLabel: shihabEntryObj.shihabQualityLabel || (mehediIsAud ? "Audio" : mehediRes),
       mehediBadge: shihabEntryObj.mehediBadge || mehediDefaultBadge,
       shihabSizeBytes: shihabPrimaryBytes,
       mehediDisplaySizeBytes: mehediDisplayBytes,
       shihabDisplayName: shihabEntryObj.shihabDisplayName || "",
+      shihabTitleHint: shihabEntryObj.shihabTitleHint || "",
       mehediResolvedFileName: shihabEntryObj.mehediResolvedFileName || "",
       shihabGroupKey: shihabEntryObj.shihabGroupKey || "",
       mehediShortcode: shihabEntryObj.mehediShortcode || "",
@@ -817,9 +994,52 @@
     return shihabBestGroup || mehediCandidateSet.values().next().value || "";
   }
 
+  function mehediIsStreamCompatibleWithVideoElement(shihabStreamItem, mehediVidEl) {
+    if (!shihabStreamItem || !mehediVidEl) return true;
+    const shihabIsAud = Boolean(shihabStreamItem.shihabIsAudioOnly || shihabStreamItem.mehediMediaKind === "AUDIO");
+
+    // 1. Duration guard: reject streams from shorter/longer unrelated feed videos (e.g. 35s Reel vs 3:01 clip)
+    const mehediLiveDur = Number(mehediVidEl.duration);
+    const shihabStreamDur = Number(shihabStreamItem.mehediDurationSec || 0);
+    if (Number.isFinite(mehediLiveDur) && mehediLiveDur > 2 && shihabStreamDur > 2) {
+      const mehediMaxDrift = Math.max(4.5, mehediLiveDur * 0.10);
+      if (Math.abs(shihabStreamDur - mehediLiveDur) > mehediMaxDrift) {
+        return false;
+      }
+    }
+
+    // 2. Aspect-ratio guard on video tracks: reject portrait 9:16 streams when <video> is 1:1 square or 16:9 landscape (and vice versa)
+    if (!shihabIsAud) {
+      const shihabVidW = Number(mehediVidEl.videoWidth || 0);
+      const mehediVidH = Number(mehediVidEl.videoHeight || 0);
+      const shihabStrW = Number(shihabStreamItem.shihabWidth || 0);
+      const mehediStrH = Number(shihabStreamItem.mehediHeight || 0);
+      if (shihabVidW > 0 && mehediVidH > 0 && shihabStrW > 0 && mehediStrH > 0) {
+        const shihabLiveRatio = shihabVidW / mehediVidH;
+        const mehediStrRatio = shihabStrW / mehediStrH;
+        if (Math.abs(mehediStrRatio - shihabLiveRatio) / shihabLiveRatio > 0.20) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
   // Resolve ONE winning shihabGroupKey for mehediActiveVideo so unrelated preloaded/earlier videos NEVER mix!
-  function mehediResolveWinningGroupForVideo(mehediActiveVideo, shihabCtx) {
-    // Priority 1: Byte-exact FNV-1a MSE SourceBuffer.appendBuffer match
+  function mehediResolveWinningGroupForVideo(mehediActiveVideo, shihabCtx, mehediIsMultiVideoFeed) {
+    // Priority 0: Direct DOM <video> React Fiber / YouTube #movie_player binding on this exact <video> node!
+    if (shihabCtx.shihabDirectDomGroupKeys && shihabCtx.shihabDirectDomGroupKeys.size > 0) {
+      for (const mehediDirGrp of shihabCtx.shihabDirectDomGroupKeys) {
+        if (shihabCtx.shihabExactGroupKeys.has(mehediDirGrp)) {
+          return mehediDirGrp;
+        }
+      }
+      const shihabPickedDirect = shihabPickFreshestMatchingGroup(shihabCtx.shihabDirectDomGroupKeys);
+      if (shihabPickedDirect) return shihabPickedDirect;
+    }
+
+    // Priority 1: Byte-exact FNV-1a ftyp/moof MSE SourceBuffer.appendBuffer match
     if (shihabCtx.shihabExactGroupKeys.size > 0) {
       for (const mehediExGrp of shihabCtx.shihabExactGroupKeys) {
         if (shihabCtx.mehediRouteAndCardGroupKeys.has(mehediExGrp)) {
@@ -830,7 +1050,7 @@
       if (shihabPickedExact) return shihabPickedExact;
     }
 
-    // Priority 2: Route URL (/reel/..., /p/..., ?v=...) or card permalink shortcode / altId match
+    // Priority 2: Route URL (/reel/..., /p/..., ?v=...) or single-video card permalink shortcode / altId match
     if (shihabCtx.mehediRouteAndCardGroupKeys.size > 0) {
       const mehediPickedRoute = shihabPickFreshestMatchingGroup(shihabCtx.mehediRouteAndCardGroupKeys);
       if (mehediPickedRoute) return mehediPickedRoute;
@@ -842,59 +1062,43 @@
       if (shihabPickedBlob) return shihabPickedBlob;
     }
 
-    // Priority 4: Live video caption match against manifest titleHints or stream display names
+    // Priority 4: Live scoped video caption match against manifest titleHints
     const mehediLiveCaption = shihabExtractBestVideoTitle(mehediActiveVideo).toLowerCase();
-    if (mehediLiveCaption && mehediLiveCaption.length >= 6) {
-      const shihabProbeSlice = mehediLiveCaption.slice(0, 22);
+    if (mehediLiveCaption && mehediLiveCaption.length >= 8) {
+      const shihabProbeSlice = mehediLiveCaption.slice(0, 24);
       for (const [mehediGrpKey, shihabHintVal] of shihabGroupKeyTitleMap.entries()) {
         const mehediHintLower = mehediCleanCaptionText(shihabHintVal).toLowerCase();
-        if (mehediHintLower && mehediHintLower.length >= 6 &&
-            (mehediLiveCaption.includes(mehediHintLower.slice(0, 22)) || mehediHintLower.includes(shihabProbeSlice))) {
-          const shihabHasStreams = shihabTabStreamsCache.some((mehediIt) => mehediIt && mehediIt.shihabGroupKey === mehediGrpKey);
-          if (shihabHasStreams) return mehediGrpKey;
-        }
-      }
-      for (const mehediItem of shihabTabStreamsCache) {
-        if (!mehediItem || !mehediItem.shihabGroupKey) continue;
-        const shihabDispLower = String(mehediItem.shihabDisplayName || "").toLowerCase();
-        if (shihabDispLower && shihabDispLower.length >= 6 &&
-            (mehediLiveCaption.includes(shihabDispLower.slice(0, 22)) || shihabDispLower.includes(shihabProbeSlice))) {
-          return mehediItem.shihabGroupKey;
+        if (mehediHintLower && mehediHintLower.length >= 8 &&
+            (mehediLiveCaption.includes(mehediHintLower.slice(0, 24)) || mehediHintLower.includes(shihabProbeSlice))) {
+          const shihabMatchingStreams = shihabTabStreamsCache.filter(
+            (mehediIt) => mehediIt && mehediIt.shihabGroupKey === mehediGrpKey && mehediIsStreamCompatibleWithVideoElement(mehediIt, mehediActiveVideo)
+          );
+          if (shihabMatchingStreams.length > 0) return mehediGrpKey;
         }
       }
     }
 
-    // Priority 5: Orientation-compatible newest group in shihabTabStreamsCache (portrait Reel vs landscape video)
-    const shihabVidW = mehediActiveVideo ? Number(mehediActiveVideo.videoWidth || 0) : 0;
-    const mehediVidH = mehediActiveVideo ? Number(mehediActiveVideo.videoHeight || 0) : 0;
-    const shihabKnowsAspect = shihabVidW > 0 && mehediVidH > 0;
-    const mehediIsPortrait = shihabKnowsAspect ? (shihabVidW <= mehediVidH) : false;
+    // NEVER guess a random/newest stream group on multi-video feeds (Facebook/Instagram/X/TikTok feeds)!
+    if (mehediIsMultiVideoFeed) {
+      return "";
+    }
 
-    let shihabNewestAspectGroup = "";
-    let mehediNewestAspectTs = -1;
-    let shihabNewestAnyGroup = "";
-    let mehediNewestAnyTs = -1;
-
+    // Priority 5 (Single-video pages ONLY): Aspect/duration-compatible newest group in shihabTabStreamsCache
+    let shihabNewestCompatGroup = "";
+    let mehediNewestCompatTs = -1;
     for (const shihabRec of shihabTabStreamsCache) {
       if (!shihabRec || !shihabRec.shihabGroupKey) continue;
+      if (!mehediIsStreamCompatibleWithVideoElement(shihabRec, mehediActiveVideo)) continue;
       const mehediTs = shihabRec.shihabDetectedAt || 0;
-      if (mehediTs > mehediNewestAnyTs) {
-        mehediNewestAnyTs = mehediTs;
-        shihabNewestAnyGroup = shihabRec.shihabGroupKey;
-      }
-      if (shihabKnowsAspect && !shihabRec.shihabIsAudioOnly && shihabRec.shihabWidth > 0 && shihabRec.mehediHeight > 0) {
-        const mehediRecPortrait = shihabRec.shihabWidth <= shihabRec.mehediHeight;
-        if (mehediRecPortrait === mehediIsPortrait && mehediTs > mehediNewestAspectTs) {
-          mehediNewestAspectTs = mehediTs;
-          shihabNewestAspectGroup = shihabRec.shihabGroupKey;
-        }
+      if (mehediTs > mehediNewestCompatTs) {
+        mehediNewestCompatTs = mehediTs;
+        shihabNewestCompatGroup = shihabRec.shihabGroupKey;
       }
     }
-
-    return shihabNewestAspectGroup || shihabNewestAnyGroup || "";
+    return shihabNewestCompatGroup;
   }
 
-  // Collect streams with Strict Single-Group Isolation so Facebook/Instagram Reels & feeds NEVER mix videos!
+  // Collect streams with Strict Single-Video Isolation so Facebook/Instagram Reels & feeds NEVER mix videos!
   function shihabCollectMediaFromDomAndSniffer(mehediActiveVideo) {
     const mehediCombined = [];
     const shihabAllDomVideos = shihabCollectAllVideosDeep(document, []);
@@ -907,11 +1111,12 @@
 
     // 1. Strict Single-Group Isolation across background-sniffed & manifest-extracted streams
     let shihabScopedBgStreams = [];
-    const mehediWinningGroupKey = mehediResolveWinningGroupForVideo(mehediActiveVideo, shihabCtx);
+    const mehediWinningGroupKey = mehediResolveWinningGroupForVideo(mehediActiveVideo, shihabCtx, mehediIsMultiVideoFeed);
 
     if (mehediWinningGroupKey) {
       shihabScopedBgStreams = shihabTabStreamsCache.filter((mehediItem) => {
         if (!mehediItem || !mehediItem.shihabStreamUrl) return false;
+        if (!mehediIsStreamCompatibleWithVideoElement(mehediItem, mehediActiveVideo)) return false;
         if (mehediItem.shihabGroupKey === mehediWinningGroupKey) return true;
         if (!mehediItem.shihabGroupKey && shihabCtx.shihabExactBoundUrls.has(mehediItem.shihabStreamUrl)) return true;
         return false;
@@ -919,6 +1124,7 @@
     } else if (shihabCtx.shihabBoundUrls.size > 0 || shihabCtx.shihabShortcodes.size > 0) {
       shihabScopedBgStreams = shihabTabStreamsCache.filter((mehediItem) => {
         if (!mehediItem || !mehediItem.shihabStreamUrl) return false;
+        if (!mehediIsStreamCompatibleWithVideoElement(mehediItem, mehediActiveVideo)) return false;
         if (shihabCtx.shihabBoundUrls.has(mehediItem.shihabStreamUrl)) return true;
         if (mehediItem.mehediShortcode && shihabCtx.shihabShortcodes.has(mehediItem.mehediShortcode)) return true;
         if (Array.isArray(mehediItem.mehediAltIds) && mehediItem.mehediAltIds.some((shihabId) => shihabCtx.shihabShortcodes.has(String(shihabId)))) {
@@ -932,7 +1138,9 @@
     if (shihabScopedBgStreams.length === 0 && shihabTabStreamsCache.length > 0 && !mehediIsMultiVideoFeed) {
       const shihabAnyGroupedInCache = shihabTabStreamsCache.some((mehediIt) => Boolean(mehediIt && mehediIt.shihabGroupKey));
       if (!shihabAnyGroupedInCache) {
-        shihabScopedBgStreams = shihabTabStreamsCache.filter((mehediIt) => mehediIt && !mehediIt.shihabGroupKey);
+        shihabScopedBgStreams = shihabTabStreamsCache.filter(
+          (mehediIt) => mehediIt && !mehediIt.shihabGroupKey && mehediIsStreamCompatibleWithVideoElement(mehediIt, mehediActiveVideo)
+        );
       }
     }
 
@@ -1011,17 +1219,35 @@
       shihabVideoItems[0].mehediBadge = `${mehediFmt} ${mehediIntrinsicRes}`;
     }
 
-    // Sort: VIDEO tracks first (highest resolution -> lowest), then AUDIO tracks
+    // Sort: VIDEO tracks first (highest resolution -> progressive/audio-paired -> MP4 -> largest), then single best AUDIO
     mehediCombined.sort((shihabA, mehediB) => {
       if (shihabA.shihabIsAudioOnly !== mehediB.shihabIsAudioOnly) {
         return shihabA.shihabIsAudioOnly ? 1 : -1;
       }
       const shihabResDiff = shihabNumericResRank(mehediB.shihabResolution) - shihabNumericResRank(shihabA.shihabResolution);
       if (shihabResDiff !== 0) return shihabResDiff;
+      const mehediSoundA = (shihabA.mehediTrackRole === "progressive" || Boolean(shihabA.mehediAudioCompanionUrl)) ? 1 : 0;
+      const shihabSoundB = (mehediB.mehediTrackRole === "progressive" || Boolean(mehediB.mehediAudioCompanionUrl)) ? 1 : 0;
+      if (mehediSoundA !== shihabSoundB) return shihabSoundB - mehediSoundA;
+      const mehediMp4A = (shihabA.shihabExt === "mp4" || shihabA.shihabExt === "m4a") ? 1 : 0;
+      const shihabMp4B = (mehediB.shihabExt === "mp4" || mehediB.shihabExt === "m4a") ? 1 : 0;
+      if (mehediMp4A !== shihabMp4B) return shihabMp4B - mehediMp4A;
       return (mehediB.mehediDisplaySizeBytes || 0) - (shihabA.mehediDisplaySizeBytes || 0);
     });
 
-    return mehediCombined;
+    // Strict per-resolution deduplication so each quality of THIS selected video appears once (zero duplicate rows!)
+    const shihabUniqueQualities = [];
+    const mehediSeenQualKeys = new Set();
+    for (const shihabCandidate of mehediCombined) {
+      const mehediQualKey = shihabCandidate.shihabIsAudioOnly
+        ? "AUDIO"
+        : (shihabCandidate.shihabResolution ? `VIDEO:${shihabCandidate.shihabResolution}` : `URL:${shihabCandidate.shihabStreamUrl}`);
+      if (mehediSeenQualKeys.has(mehediQualKey)) continue;
+      mehediSeenQualKeys.add(mehediQualKey);
+      shihabUniqueQualities.push(shihabCandidate);
+    }
+
+    return shihabUniqueQualities;
   }
 
   function mehediIsVideoVisibleInViewport(shihabVid) {
@@ -1042,7 +1268,12 @@
   }
 
   function mehediFindPrimaryVisibleVideo() {
+    if (shihabDropdownOpen && mehediLockedDropdownVideoEl && mehediIsVideoVisibleInViewport(mehediLockedDropdownVideoEl)) {
+      return mehediLockedDropdownVideoEl;
+    }
+
     if (mehediHoveredVideoEl && Date.now() < shihabHoveredUntilMs && mehediIsVideoVisibleInViewport(mehediHoveredVideoEl)) {
+      mehediLastSelectedVideoEl = mehediHoveredVideoEl;
       return mehediHoveredVideoEl;
     }
 
@@ -1074,7 +1305,11 @@
       }
     }
 
-    return mehediPlayingCandidate || mehediLargestCandidate;
+    const shihabChosen = mehediPlayingCandidate || mehediLargestCandidate;
+    if (shihabChosen) {
+      mehediLastSelectedVideoEl = shihabChosen;
+    }
+    return shihabChosen;
   }
 
   function shihabRefreshBackgroundStreamsThrottled(mehediForceNow) {
@@ -1142,14 +1377,19 @@
 
       const shihabCtxBefore = shihabResolveVideoContext(mehediActiveVid);
       let mehediKnownKeepGroup = "";
-      if (shihabCtxBefore.shihabExactGroupKeys.size > 0) {
+      if (shihabCtxBefore.shihabDirectDomGroupKeys && shihabCtxBefore.shihabDirectDomGroupKeys.size > 0) {
+        mehediKnownKeepGroup = shihabPickFreshestMatchingGroup(shihabCtxBefore.shihabDirectDomGroupKeys);
+      } else if (shihabCtxBefore.shihabExactGroupKeys.size > 0) {
         mehediKnownKeepGroup = shihabPickFreshestMatchingGroup(shihabCtxBefore.shihabExactGroupKeys);
       } else if (shihabCtxBefore.mehediRouteAndCardGroupKeys.size > 0) {
         mehediKnownKeepGroup = shihabPickFreshestMatchingGroup(shihabCtxBefore.mehediRouteAndCardGroupKeys);
       }
       const shihabKnownKeepUrls = Array.from(shihabCtxBefore.shihabExactBoundUrls);
 
-      // Ask MAIN-world hook to re-scan current page manifests & scripts
+      // Ask MAIN-world hook to re-scan current page manifests, scripts & this exact <video> fiber
+      if (mehediActiveVid) {
+        mehediEnsureVideoUidAndInspect(mehediActiveVid, true);
+      }
       try {
         window.postMessage({ __shihabMehediContentPing: true }, "*");
       } catch (_) {}
@@ -1217,7 +1457,7 @@
           background: linear-gradient(135deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.97));
           border: 1px solid rgba(96, 165, 250, 0.82);
           border-radius: 6px;
-          padding: 4px 9px;
+          padding: 4px 7px;
           color: #f8fafc;
           font-size: 12px;
           font-weight: 600;
@@ -1424,22 +1664,18 @@
       const shihabPrimaryBtn = document.createElement("button");
       shihabPrimaryBtn.className = "mehedi-btn";
       shihabPrimaryBtn.type = "button";
-      shihabPrimaryBtn.title = "Download this video with MHS Download Manager";
+      shihabPrimaryBtn.title = "Download selected video with MHS Download Manager";
 
       const mehediLogoImg = document.createElement("img");
       mehediLogoImg.className = "mehedi-logo";
       mehediLogoImg.src = SHIHAB_MHS_ICON_DATA_URI;
       mehediLogoImg.alt = "MHS";
 
-      const shihabLabelSpan = document.createElement("span");
-      shihabLabelSpan.textContent = "Download this video";
-
       const mehediCountPill = document.createElement("span");
       mehediCountPill.className = "shihab-count";
-      mehediCountPill.textContent = "1";
+      mehediCountPill.textContent = "⬇";
 
       shihabPrimaryBtn.appendChild(mehediLogoImg);
-      shihabPrimaryBtn.appendChild(shihabLabelSpan);
       shihabPrimaryBtn.appendChild(mehediCountPill);
 
       const shihabSep = document.createElement("span");
@@ -1482,7 +1718,6 @@
       shihabShadow.appendChild(shihabWrap);
 
       shihabRefs = {
-        shihabLabelSpan,
         mehediCountPill,
         mehediRetrackBtn,
         mehediToastEl,
@@ -1498,8 +1733,11 @@
       shihabPrimaryBtn.addEventListener("click", async (mehediEv) => {
         mehediEv.preventDefault();
         mehediEv.stopPropagation();
-        await shihabRefreshBackgroundStreamsThrottled(true);
         const shihabActiveVid = mehediFindPrimaryVisibleVideo();
+        if (shihabActiveVid) {
+          mehediEnsureVideoUidAndInspect(shihabActiveVid, true);
+        }
+        await shihabRefreshBackgroundStreamsThrottled(true);
         const mehediStreams = shihabCollectMediaFromDomAndSniffer(shihabActiveVid);
         if (mehediStreams.length === 0) {
           mehediShowPanelStatusToast("Protected DRM/SABR stream — direct HTTP stream not exposed by site.", true);
@@ -1507,10 +1745,12 @@
         }
         if (mehediStreams.length === 1 || shihabDropdownOpen) {
           shihabDropdownOpen = false;
+          mehediLockedDropdownVideoEl = null;
           mehediTriggerStreamDownload(mehediStreams[0], shihabActiveVid);
           shihabRenderFloatingIdmVideoPanel();
         } else {
-          // Multiple qualities available: open the IDM resolution picker immediately!
+          // Multiple qualities available: lock onto THIS selected <video> and open the resolution picker!
+          mehediLockedDropdownVideoEl = shihabActiveVid;
           shihabDropdownOpen = true;
           shihabRenderFloatingIdmVideoPanel();
         }
@@ -1527,7 +1767,14 @@
         shihabEv.stopPropagation();
         shihabDropdownOpen = !shihabDropdownOpen;
         if (shihabDropdownOpen) {
+          const mehediSelVid = mehediFindPrimaryVisibleVideo();
+          mehediLockedDropdownVideoEl = mehediSelVid;
+          if (mehediSelVid) {
+            mehediEnsureVideoUidAndInspect(mehediSelVid, true);
+          }
           await shihabRefreshBackgroundStreamsThrottled(true);
+        } else {
+          mehediLockedDropdownVideoEl = null;
         }
         shihabRenderFloatingIdmVideoPanel();
       });
@@ -1537,6 +1784,7 @@
         mehediEv.stopPropagation();
         shihabPanelDismissedUrl = location.href;
         shihabDropdownOpen = false;
+        mehediLockedDropdownVideoEl = null;
         mehediShadowHost.style.display = "none";
       });
     }
@@ -1573,10 +1821,6 @@
     const mehediHost = shihabEnsureShadowHostMounted();
     if (!mehediHost || !shihabRefs) return;
 
-    if (shihabRefs.shihabLabelSpan) {
-      shihabRefs.shihabLabelSpan.textContent = mehediPanelMiniMode ? "MHS" : "Download this video";
-    }
-
     const shihabStreams = shihabCollectMediaFromDomAndSniffer(shihabTargetVideo);
     const mehediTopRes = shihabStreams.length > 0 && shihabStreams[0].shihabResolution
       ? shihabStreams[0].shihabResolution
@@ -1597,7 +1841,7 @@
     const mehediDesiredRightEdge = (mehediRect.top - 34 >= mehediSafeTopMin)
       ? Math.round(mehediRect.right)
       : Math.round(mehediRect.right - 10);
-    const shihabMenuMaxW = shihabDropdownOpen ? 445 : 275;
+    const shihabMenuMaxW = shihabDropdownOpen ? 445 : 175;
     const mehediClampedRightEdge = Math.min(
       window.innerWidth - 8,
       Math.max(Math.min(window.innerWidth - 8, shihabMenuMaxW + 8), mehediDesiredRightEdge)
@@ -1613,7 +1857,7 @@
     shihabMenuEl.style.display = shihabDropdownOpen ? "block" : "none";
     if (shihabDropdownOpen) {
       shihabClearElementChildren(shihabMenuEl);
-      const mehediLiveCaption = shihabExtractBestVideoTitle(shihabTargetVideo);
+      const mehediLiveCaption = shihabExtractBestVideoTitle(shihabTargetVideo, shihabStreams[0]);
 
       const shihabHeaderDiv = document.createElement("div");
       shihabHeaderDiv.className = "shihab-menu-head";
@@ -1679,6 +1923,7 @@
             mehediClickEv.preventDefault();
             mehediClickEv.stopPropagation();
             shihabDropdownOpen = false;
+            mehediLockedDropdownVideoEl = null;
             mehediTriggerStreamDownload(mehediStream, shihabTargetVideo);
             shihabRenderFloatingIdmVideoPanel();
           });
@@ -1689,7 +1934,7 @@
   }
 
   function mehediTriggerStreamDownload(shihabStreamEntry, mehediTargetVideo) {
-    const shihabRealTitle = shihabExtractBestVideoTitle(mehediTargetVideo);
+    const shihabRealTitle = shihabExtractBestVideoTitle(mehediTargetVideo, shihabStreamEntry);
     const mehediCleanStem = (shihabRealTitle || "Video")
       .replace(/[\\/:*?"<>|\x00-\x1f]+/g, " ")
       .replace(/\s+/g, " ")
@@ -1927,6 +2172,64 @@
       return true;
     }
 
+    if (shihabMsg && shihabMsg.shihabCmd === "mehedi_get_selected_video_streams") {
+      if (window !== window.top) {
+        return false;
+      }
+      const mehediSelVid =
+        mehediFindPrimaryVisibleVideo() ||
+        (mehediLastSelectedVideoEl && mehediLastSelectedVideoEl.isConnected ? mehediLastSelectedVideoEl : null);
+      if (mehediSelVid) {
+        mehediEnsureVideoUidAndInspect(mehediSelVid, true);
+      }
+      shihabRefreshBackgroundStreamsThrottled(true).then(() => {
+        const shihabOnlySelectedStreams = mehediSelVid ? shihabCollectMediaFromDomAndSniffer(mehediSelVid) : [];
+        const mehediExactTitle = shihabExtractBestVideoTitle(mehediSelVid, shihabOnlySelectedStreams[0]);
+        const shihabCleanStem = (mehediExactTitle || "Video")
+          .replace(/[\\/:*?"<>|\x00-\x1f]+/g, " ")
+          .replace(/\s+/g, " ")
+          .replace(/[. ]+$/, "")
+          .trim()
+          .slice(0, 105) || "Video";
+
+        const mehediFormattedList = shihabOnlySelectedStreams.map((shihabIt) => {
+          const mehediIsAud = Boolean(shihabIt.shihabIsAudioOnly || shihabIt.mehediMediaKind === "AUDIO");
+          const shihabQual = shihabIt.shihabQualityLabel || (mehediIsAud ? "Audio" : (shihabIt.shihabResolution || ""));
+          let mehediExtDot = ".mp4";
+          const shihabRawE = String(shihabIt.shihabExt || "").toLowerCase();
+          if (shihabRawE === "m3u8") mehediExtDot = ".mp4";
+          else if (shihabRawE === "webm") mehediExtDot = ".webm";
+          else if (shihabRawE === "mkv") mehediExtDot = ".mkv";
+          else if (shihabRawE === "mp3") mehediExtDot = ".mp3";
+          else if (shihabRawE === "m4a" || mehediIsAud) mehediExtDot = ".m4a";
+
+          const shihabResolvedFile = shihabQual
+            ? `${shihabCleanStem} [${shihabQual}]${mehediExtDot}`
+            : `${shihabCleanStem}${mehediExtDot}`;
+
+          return Object.assign({}, shihabIt, {
+            shihabDisplayName: shihabCleanStem,
+            mehediResolvedFileName: shihabResolvedFile
+          });
+        });
+
+        shihabReply({
+          ok: true,
+          shihabHasSelectedVideo: Boolean(mehediSelVid),
+          shihabVideoTitle: shihabCleanStem,
+          mehediStreams: mehediFormattedList
+        });
+      }).catch(() => {
+        shihabReply({
+          ok: false,
+          shihabHasSelectedVideo: false,
+          shihabVideoTitle: "",
+          mehediStreams: []
+        });
+      });
+      return true;
+    }
+
     if (shihabMsg && shihabMsg.shihabCmd === "mehedi_get_video_caption") {
       const mehediBestVid = mehediFindPrimaryVisibleVideo();
       const shihabCaption = shihabExtractBestVideoTitle(mehediBestVid);
@@ -1959,8 +2262,10 @@
       if (shihabNode && shihabNode.tagName === "VIDEO") {
         const mehediChanged = mehediHoveredVideoEl !== shihabNode;
         mehediHoveredVideoEl = shihabNode;
+        mehediLastSelectedVideoEl = shihabNode;
         shihabHoveredUntilMs = Date.now() + 6000;
-        if (mehediChanged) {
+        mehediEnsureVideoUidAndInspect(shihabNode, false);
+        if (mehediChanged && !mehediLockedDropdownVideoEl) {
           shihabDropdownOpen = false;
         }
         shihabRefreshBackgroundStreamsThrottled(false);
@@ -1979,8 +2284,10 @@
             shihabY >= mehediRect.top && shihabY <= mehediRect.bottom) {
           const mehediSwitched = mehediHoveredVideoEl !== shihabVid;
           mehediHoveredVideoEl = shihabVid;
+          mehediLastSelectedVideoEl = shihabVid;
           shihabHoveredUntilMs = Date.now() + 6000;
-          if (mehediSwitched) {
+          mehediEnsureVideoUidAndInspect(shihabVid, false);
+          if (mehediSwitched && !mehediLockedDropdownVideoEl) {
             shihabDropdownOpen = false;
           }
           shihabRefreshBackgroundStreamsThrottled(false);
@@ -1993,6 +2300,10 @@
 
   function mehediMediaLifecycleListener(shihabEv) {
     if (shihabEv.target && shihabEv.target.tagName === "VIDEO") {
+      mehediEnsureVideoUidAndInspect(shihabEv.target, false);
+      if (shihabEv.type === "play" || shihabEv.type === "playing") {
+        mehediLastSelectedVideoEl = shihabEv.target;
+      }
       shihabRefreshBackgroundStreamsThrottled(false);
       shihabRenderFloatingIdmVideoPanel();
     }
