@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+$shihabAppVersion = '1.0.1'
 $shihabProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $mehediBinDir = Join-Path $shihabProjectRoot 'bin'
 $shihabObjDir = Join-Path $shihabProjectRoot 'obj'
@@ -77,8 +78,31 @@ if (Test-Path (Join-Path $shihabProjectRoot 'LICENSE')) {
     $false)
 Remove-Item -LiteralPath $mehediPayloadStage -Recurse -Force -ErrorAction SilentlyContinue
 
-# 3. Compile x64 Setup Wizard (MHS-Download-Manager-Setup-1.0.0-x64.exe)
-$mehediSetupOutExe = Join-Path $mehediBinDir 'MHS-Download-Manager-Setup-1.0.0-x64.exe'
+# Verify embedded payload zip includes mdm.exe and complete unpacked extension/ folder
+$mehediPayloadInspect = [System.IO.Compression.ZipFile]::OpenRead($shihabPayloadZip)
+try {
+    $shihabZipNames = @($mehediPayloadInspect.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
+    foreach ($mehediExpected in @(
+        'mdm.exe',
+        'extension/manifest.json',
+        'extension/mehedi_content.js',
+        'extension/mehedi_page_hook.js',
+        'extension/shihab_background.js',
+        'extension/shihab_popup.html',
+        'extension/mehedi_popup.js',
+        'extension/images/shihab_logo128.png'
+    )) {
+        if ($shihabZipNames -notcontains $mehediExpected) {
+            throw "Installer payload zip missing required entry: $mehediExpected"
+        }
+    }
+} finally {
+    $mehediPayloadInspect.Dispose()
+}
+
+# 3. Compile x64 Setup Wizard (MHS-Download-Manager-Setup-1.0.1-x64.exe)
+Get-ChildItem -Path $mehediBinDir -Filter 'MHS-Download-Manager-Setup-*-x64.exe' -ErrorAction SilentlyContinue | Remove-Item -Force
+$mehediSetupOutExe = Join-Path $mehediBinDir "MHS-Download-Manager-Setup-$shihabAppVersion-x64.exe"
 $shihabInstallerSrc = Join-Path $shihabProjectRoot 'src\installer\ShihabSetupWizard.cs'
 
 & $shihabCsc /nologo /target:winexe /platform:x64 /optimize+ `

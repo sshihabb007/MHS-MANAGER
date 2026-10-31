@@ -15,13 +15,13 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-[assembly: AssemblyTitle("MHS Download Manager 1.0.0 Setup (Mehedi Hasan Shihab)")]
-[assembly: AssemblyDescription("Official Windows x64 Installer & Uninstaller for MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)")]
+[assembly: AssemblyTitle("MHS Download Manager 1.0.1 Setup (Mehedi Hasan Shihab)")]
+[assembly: AssemblyDescription("Official Windows x64 Installer & Uninstaller for MHS Download Manager 1.0.1 (Mehedi Hasan Shihab)")]
 [assembly: AssemblyCompany("Mehedi Hasan Shihab")]
 [assembly: AssemblyProduct("MHS Download Manager Setup")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 Mehedi Hasan Shihab")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 namespace ShihabMehediInstaller
 {
@@ -48,8 +48,8 @@ namespace ShihabMehediInstaller
 
     public static class ShihabSetupTheme
     {
-        public const string ShihabProductTitle = "MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)";
-        public const string MehediVersionText = "1.0.0";
+        public const string ShihabProductTitle = "MHS Download Manager 1.0.1 (Mehedi Hasan Shihab)";
+        public const string MehediVersionText = "1.0.1";
         public const string ShihabUninstallRegKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\MHSDownloadManager";
         public const string MehediRunRegKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
         public const string ShihabRunValueName = "MHSDownloadManager";
@@ -331,6 +331,17 @@ namespace ShihabMehediInstaller
 
             StopOwnedShihabAppInDirectory(shihabInstallRoot, delegate(string shihabMsg) { mehediReport(10, shihabMsg); });
 
+            string mehediExtensionDir = Path.Combine(shihabInstallRoot, "extension");
+            if (Directory.Exists(mehediExtensionDir))
+            {
+                try
+                {
+                    mehediReport(12, "Refreshing unpacked Browser Extension folder: " + mehediExtensionDir);
+                    Directory.Delete(mehediExtensionDir, true);
+                }
+                catch { }
+            }
+
             Stream shihabPayloadStream = typeof(MehediInstallerEngine).Assembly.GetManifestResourceStream("ShihabMehediInstaller.payload.zip");
             if (shihabPayloadStream == null)
             {
@@ -387,7 +398,22 @@ namespace ShihabMehediInstaller
             }
 
             string shihabInstalledExe = Path.Combine(shihabInstallRoot, "mdm.exe");
-            string mehediExtensionDir = Path.Combine(shihabInstallRoot, "extension");
+            string[] shihabRequiredExtFiles = new string[]
+            {
+                "manifest.json",
+                "mehedi_content.js",
+                "mehedi_page_hook.js",
+                "shihab_background.js",
+                "shihab_popup.html"
+            };
+            for (int mehediReqIdx = 0; mehediReqIdx < shihabRequiredExtFiles.Length; mehediReqIdx++)
+            {
+                string shihabReqFile = Path.Combine(mehediExtensionDir, shihabRequiredExtFiles[mehediReqIdx]);
+                if (!File.Exists(shihabReqFile))
+                {
+                    throw new InvalidOperationException("Unpacked browser extension file missing in installation directory: " + shihabReqFile);
+                }
+            }
 
             if (!mehediOpts.ShihabSkipRegistryAndShortcuts)
             {
@@ -851,15 +877,15 @@ namespace ShihabMehediInstaller
             _mehediStepWelcome = new Panel { Bounds = shihabBodyBounds, BackColor = BackColor };
             Label shihabWelHead = new Label
             {
-                Text = "Welcome to MHS Download Manager 1.0.0 Setup",
+                Text = "Welcome to MHS Download Manager 1.0.1 Setup",
                 Location = new Point(22, 16),
                 AutoSize = true,
                 Font = new Font("Segoe UI Semibold", 11f)
             };
             Label mehediWelDesc = new Label
             {
-                Text = "This wizard will install MHS Download Manager 1.0.0 (Mehedi Hasan Shihab) on your computer,\n" +
-                       "including the ready-to-load 'extension' folder inside your installation directory for Chrome, Brave, and Edge.",
+                Text = "This wizard will install MHS Download Manager 1.0.1 (Mehedi Hasan Shihab) on your computer,\n" +
+                       "keeping the unpacked 'extension' folder inside your installation directory ready to load in Chrome, Brave, and Edge.",
                 Location = new Point(22, 44),
                 Size = new Size(595, 42),
                 ForeColor = ShihabSetupTheme.GetShihabMutedText()
@@ -876,13 +902,13 @@ namespace ShihabMehediInstaller
                 BorderStyle = BorderStyle.FixedSingle,
                 Font = new Font("Consolas", 8.8f),
                 Text =
-                    "Planned Installation Components:\r\n" +
+                    "Planned Installation Components (<InstallDir>):\r\n" +
                     "  • mdm.exe          — x64 Download Accelerator (Obsidian Dark UI, 1-32 Dynamic Segments)\r\n" +
-                    "  • extension\\       — Unpacked Manifest V3 Extension folder (Chrome / Brave / Edge)\r\n" +
+                    "  • extension\\       — Ready-to-load Unpacked MV3 Extension (Chrome / Brave / Edge)\r\n" +
                     "  • Uninstall.exe    — Clean Windows Uninstaller\r\n\r\n" +
-                    "Included v1.0.0 Capabilities:\r\n" +
+                    "Included v1.0.1 Capabilities:\r\n" +
+                    "  • Outside top-right corner semi-transparent single-icon floating video bar (↻)\r\n" +
                     "  • High-speed YouTube HD/4K video + parallel burst-sliced companion audio\r\n" +
-                    "  • Exact selected-video tracking & icon-only floating bar (↻) on FB, IG, YT & HTML5\r\n" +
                     "  • Built-in lossless MP4 / WebM / MKV muxer (zero ffmpeg dependency)\r\n" +
                     "  • Automatic browser download interception + Queues, Scheduler & Site Grabber\r\n\r\n" +
                     "License: MIT License — Copyright (c) 2026 Mehedi Hasan Shihab"
@@ -990,7 +1016,7 @@ namespace ShihabMehediInstaller
             _mehediStepProgress = new Panel { Bounds = shihabBodyBounds, BackColor = BackColor };
             Label shihabProgTitle = new Label
             {
-                Text = "Installing MHS Download Manager 1.0.0...",
+                Text = "Installing MHS Download Manager 1.0.1...",
                 Location = new Point(22, 16),
                 AutoSize = true,
                 Font = new Font("Segoe UI Semibold", 11f)
@@ -1026,7 +1052,7 @@ namespace ShihabMehediInstaller
             };
             Label shihabExtGuideLbl = new Label
             {
-                Text = "Load the installed Browser Extension in Chrome, Brave, or Edge:\n" +
+                Text = "Load the installed Browser Extension from your installation directory (Chrome / Brave / Edge):\n" +
                        "1. Open chrome://extensions or brave://extensions   2. Turn ON Developer mode   3. Click 'Load unpacked' and select:",
                 Location = new Point(22, 44),
                 Size = new Size(596, 40),
@@ -1036,15 +1062,15 @@ namespace ShihabMehediInstaller
             {
                 ReadOnly = true,
                 Location = new Point(22, 90),
-                Size = new Size(482, 26),
+                Size = new Size(376, 26),
                 BackColor = ShihabSetupTheme.GetMehediInputBg(),
                 ForeColor = Color.FromArgb(56, 189, 248),
                 BorderStyle = BorderStyle.FixedSingle,
-                Font = new Font("Consolas", 9.2f)
+                Font = new Font("Consolas", 9.0f)
             };
-            Button shihabCopyExtBtn = ShihabSetupTheme.CreateShihabButton("Copy Path", ShihabSetupTheme.GetMehediAccentViolet(), Color.White, 100);
+            Button shihabCopyExtBtn = ShihabSetupTheme.CreateShihabButton("Copy Path", ShihabSetupTheme.GetMehediAccentViolet(), Color.White, 96);
             shihabCopyExtBtn.Height = 27;
-            shihabCopyExtBtn.Location = new Point(514, 88);
+            shihabCopyExtBtn.Location = new Point(406, 88);
             shihabCopyExtBtn.Click += delegate
             {
                 try
@@ -1054,25 +1080,47 @@ namespace ShihabMehediInstaller
                 }
                 catch { }
             };
+            Button mehediOpenExtBtn = ShihabSetupTheme.CreateShihabButton("Open Folder", ShihabSetupTheme.GetMehediInputBg(), ForeColor, 104);
+            mehediOpenExtBtn.Height = 27;
+            mehediOpenExtBtn.Location = new Point(510, 88);
+            mehediOpenExtBtn.Click += delegate
+            {
+                try
+                {
+                    if (!string.IsNullOrWhiteSpace(_mehediFinalExtPathBox.Text) && Directory.Exists(_mehediFinalExtPathBox.Text))
+                    {
+                        Process.Start("explorer.exe", "\"" + _mehediFinalExtPathBox.Text + "\"");
+                    }
+                }
+                catch { }
+            };
+            Label shihabExtKeptNote = new Label
+            {
+                Text = "Kept in <InstallDir>\\extension — also accessible anytime via Help -> Open Browser Extension Folder.",
+                Location = new Point(22, 122),
+                Size = new Size(592, 18),
+                ForeColor = ShihabSetupTheme.GetShihabMutedText(),
+                Font = new Font("Segoe UI", 8.5f)
+            };
 
             _shihabLaunchAppCheck = new CheckBox
             {
-                Text = "Launch MHS Download Manager 1.0.0 now",
-                Location = new Point(24, 140),
+                Text = "Launch MHS Download Manager 1.0.1 now",
+                Location = new Point(24, 152),
                 AutoSize = true,
                 Checked = true,
                 Font = new Font("Segoe UI Semibold", 9.5f)
             };
             _mehediOpenExtFolderCheck = new CheckBox
             {
-                Text = "Open the installed 'extension' folder in File Explorer now (for Chrome / Brave Load unpacked)",
-                Location = new Point(24, 174),
+                Text = "Open the installed 'extension' folder in File Explorer on Finish (for Chrome / Brave Load unpacked)",
+                Location = new Point(24, 184),
                 AutoSize = true,
                 Checked = true
             };
             _shihabStepFinish.Controls.AddRange(new Control[]
             {
-                mehediFinTitle, shihabExtGuideLbl, _mehediFinalExtPathBox, shihabCopyExtBtn,
+                mehediFinTitle, shihabExtGuideLbl, _mehediFinalExtPathBox, shihabCopyExtBtn, mehediOpenExtBtn, shihabExtKeptNote,
                 _shihabLaunchAppCheck, _mehediOpenExtFolderCheck
             });
 

@@ -1345,6 +1345,18 @@ async function shihabInjectContentScriptIntoExistingTabs() {
     const mehediTabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
     for (const shihabTab of mehediTabs) {
       if (shihabTab && typeof shihabTab.id === "number" && shihabTab.id >= 0) {
+        let mehediAlreadyAlive = false;
+        try {
+          const shihabPing = await chrome.tabs.sendMessage(
+            shihabTab.id,
+            { shihabCmd: "shihab_ping_content_alive" },
+            { frameId: 0 }
+          );
+          mehediAlreadyAlive = Boolean(shihabPing && shihabPing.ok);
+        } catch (_) {}
+        if (mehediAlreadyAlive) {
+          continue;
+        }
         chrome.scripting.executeScript({
           target: { tabId: shihabTab.id, allFrames: true },
           world: "MAIN",
@@ -1626,7 +1638,6 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   mehediInstallContextMenus();
   shihabSyncDesktopConfiguration();
-  shihabInjectContentScriptIntoExistingTabs();
 });
 
 chrome.contextMenus.onClicked.addListener(async (shihabInfo, mehediTab) => {

@@ -64,12 +64,12 @@ document.addEventListener("DOMContentLoaded", async () => {
     });
     if (!shihabRes || !shihabRes.mehediOnline) {
       shihabDot.classList.remove("online");
-      mehediSub.textContent = "Offline — Launch mdm.exe v1.0.0";
+      mehediSub.textContent = "Offline — Launch mdm.exe v1.0.1";
       shihabToggleBtn.textContent = "Offline";
       return;
     }
 
-    const mehediBridgeVer = (shihabRes.shihabBridgeInfo && shihabRes.shihabBridgeInfo.version) || "1.0.0";
+    const mehediBridgeVer = (shihabRes.shihabBridgeInfo && shihabRes.shihabBridgeInfo.version) || "1.0.1";
     shihabDot.classList.add("online");
     mehediSub.textContent = shihabRes.shihabEnabled
       ? `Connected · mdm.exe v${mehediBridgeVer}`

@@ -10,99 +10,223 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: "Publish/refresh GitHub Release for current manifest version"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: mhs-ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 permissions:
   contents: write
 
 jobs:
   build-windows-x64-installer:
-    name: Build Windows x64 Setup Installer
+    name: Build, Verify & Release Windows x64 Setup
     runs-on: windows-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Validate Browser Extension Manifest & JS Syntax
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ManifestPath = Join-Path $PWD "extension\manifest.json"
+          $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+          if ($Manifest.manifest_version -ne 3) {
+            throw "Expected Manifest V3 in extension/manifest.json, got $($Manifest.manifest_version)"
+          }
+          if ([string]::IsNullOrWhiteSpace($Manifest.version)) {
+            throw "Missing version in extension/manifest.json"
+          }
+          if ($env:GITHUB_REF_NAME -like 'v*') {
+            $ExpectedTagVer = $env:GITHUB_REF_NAME.TrimStart('v')
+            if ($Manifest.version -ne $ExpectedTagVer) {
+              throw "Tag version ($ExpectedTagVer) does not match extension/manifest.json version ($($Manifest.version))"
+            }
+          }
+          Get-ChildItem -Path (Join-Path $PWD "extension") -Filter "*.js" | ForEach-Object {
+            Write-Host "Checking syntax: $($_.Name)"
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) {
+              throw "JavaScript syntax check failed for $($_.FullName)"
+            }
+          }
+
       - name: Compile mdm.exe & Setup Installer via build.ps1
         shell: pwsh
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
-      - name: Stage Official Setup Installer & SHA-256 Manifest
+      - name: Smoke-Test Setup Installer & Verify Installed extension\ Folder
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          $SetupExe = Get-ChildItem -Path (Join-Path $PWD "bin") -Filter "MHS-Download-Manager-Setup-*-x64.exe" | Select-Object -First 1
+          if (-not $SetupExe) {
+            throw "Compiled Setup .exe was not found in bin\"
+          }
+
+          $VerifyInstallDir = Join-Path $env:RUNNER_TEMP "mhs_setup_smoke_verify"
+          if (Test-Path -LiteralPath $VerifyInstallDir) {
+            Remove-Item -LiteralPath $VerifyInstallDir -Recurse -Force
+          }
+
+          Write-Host "Running silent Setup smoke test into: $VerifyInstallDir"
+          $Proc = Start-Process -FilePath $SetupExe.FullName -ArgumentList @(
+            "--shihab-silent",
+            "--shihab-no-registry",
+            "--shihab-install-dir",
+            $VerifyInstallDir
+          ) -Wait -PassThru
+
+          if ($Proc.ExitCode -ne 0) {
+            throw "Silent Setup smoke test failed with exit code $($Proc.ExitCode)"
+          }
+
+          $RequiredInstalledFiles = @(
+            "mdm.exe",
+            "Uninstall.exe",
+            "README.md",
+            "LICENSE",
+            "extension\manifest.json",
+            "extension\mehedi_content.js",
+            "extension\mehedi_page_hook.js",
+            "extension\shihab_background.js",
+            "extension\shihab_popup.html",
+            "extension\shihab_popup.css",
+            "extension\mehedi_popup.js",
+            "extension\images\shihab_logo128.png"
+          )
+
+          foreach ($RelFile in $RequiredInstalledFiles) {
+            $FullCheckPath = Join-Path $VerifyInstallDir $RelFile
+            if (-not (Test-Path -LiteralPath $FullCheckPath)) {
+              throw "Setup .exe failed to install required file in installation directory: $RelFile"
+            }
+          }
+
+          Write-Host "Verified all $($RequiredInstalledFiles.Count) installed app & unpacked extension files in $VerifyInstallDir\extension"
+          Remove-Item -LiteralPath $VerifyInstallDir -Recurse -Force
+
+      - name: Stage Official Release Assets & SHA-256 Manifest
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "release-dist" | Out-Null
 
-          $TagVer = if ($env:GITHUB_REF_NAME -like 'v*') { $env:GITHUB_REF_NAME } else { 'v1.0.0' }
-          $VerClean = $TagVer.TrimStart('v')
-          $SetupFileName = "MHS-Download-Manager-Setup-$VerClean-x64.exe"
+          $Manifest = Get-Content -LiteralPath (Join-Path $PWD "extension\manifest.json") -Raw | ConvertFrom-Json
+          $VerClean = if ($env:GITHUB_REF_NAME -like 'v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { $Manifest.version }
+          $TagVer = "v$VerClean"
 
-          $BuiltSetup = Join-Path $PWD "bin\MHS-Download-Manager-Setup-1.0.0-x64.exe"
-          $StagedSetup = Join-Path $PWD "release-dist\$SetupFileName"
-          Copy-Item -LiteralPath $BuiltSetup -Destination $StagedSetup -Force
+          $SetupVersionedName = "MHS-Download-Manager-Setup-$VerClean-x64.exe"
+          $SetupEvergreenName = "MHS-Download-Manager-Setup-x64.exe"
+          $ExtArchiveName = "MHS-Browser-Extension-$VerClean.zip"
 
-          $SetupSha = (Get-FileHash -LiteralPath $StagedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value "$SetupSha  $SetupFileName" -Encoding UTF8
+          $BuiltSetup = Join-Path $PWD "bin\MHS-Download-Manager-Setup-$VerClean-x64.exe"
+          if (-not (Test-Path -LiteralPath $BuiltSetup)) {
+            $BuiltSetup = (Get-ChildItem -Path (Join-Path $PWD "bin") -Filter "MHS-Download-Manager-Setup-*-x64.exe" | Select-Object -First 1).FullName
+          }
+
+          $StagedVersionedSetup = Join-Path $PWD "release-dist\$SetupVersionedName"
+          $StagedEvergreenSetup = Join-Path $PWD "release-dist\$SetupEvergreenName"
+          $StagedExtZip = Join-Path $PWD "release-dist\$ExtArchiveName"
+
+          Copy-Item -LiteralPath $BuiltSetup -Destination $StagedVersionedSetup -Force
+          Copy-Item -LiteralPath $BuiltSetup -Destination $StagedEvergreenSetup -Force
+
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          if (Test-Path -LiteralPath $StagedExtZip) {
+            Remove-Item -LiteralPath $StagedExtZip -Force
+          }
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            (Join-Path $PWD "extension"),
+            $StagedExtZip,
+            [System.IO.Compression.CompressionLevel]::Optimal,
+            $false)
+
+          $VersionedSha = (Get-FileHash -LiteralPath $StagedVersionedSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+          $EvergreenSha = (Get-FileHash -LiteralPath $StagedEvergreenSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+          $ExtZipSha = (Get-FileHash -LiteralPath $StagedExtZip -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $ShaLines = @(
+            "$VersionedSha  $SetupVersionedName",
+            "$EvergreenSha  $SetupEvergreenName",
+            "$ExtZipSha  $ExtArchiveName"
+          )
+          Set-Content -Path (Join-Path $PWD "release-dist\SHA256SUMS.txt") -Value ($ShaLines -join "`n") -Encoding UTF8
 
           $NotesLines = @(
-            "## MHS Download Manager $TagVer — Official Windows x64 Installer (Mehedi Hasan Shihab)",
+            "## MHS Download Manager $TagVer — Official Windows x64 Installer & Browser Suite (Mehedi Hasan Shihab)",
             "",
-            "Download and run **``$SetupFileName``** to install **MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)** along with its ready-to-load **``extension``** folder inside your installation directory.",
+            "Download and run **``$SetupVersionedName``** (or evergreen **``$SetupEvergreenName``**) to install **MHS Download Manager $VerClean (Mehedi Hasan Shihab)** along with the ready-to-load **``extension\``** folder directly inside your installation directory.",
             "",
-            "### What the Setup Installer Creates in Your Installation Directory",
-            "- **``mdm.exe``** — MHS Download Manager 1.0.0 (x64 Windows Desktop Application)",
-            "- **``extension\``** — Complete unpacked Browser Extension folder inside the installation directory for **Google Chrome**, **Brave**, and **Microsoft Edge**",
-            "- **``Uninstall.exe``** — Clean Windows Uninstaller + *Installed Apps* registration, Desktop shortcut, Start Menu shortcuts, and Startup/Native Messaging integration",
+            "### What the Setup `.exe` Installs in Your Installation Directory (`<InstallDir>`)",
+            "- **``mdm.exe``** — MHS Download Manager $VerClean (x64 Windows Desktop Application)",
+            "- **``extension\``** — Complete unpacked Manifest V3 Browser Extension kept directly inside `<InstallDir>\extension` for **Google Chrome**, **Brave**, **Microsoft Edge**, and **Opera**",
+            "- **``Uninstall.exe``** — Clean Windows Uninstaller + *Installed Apps* registration, Desktop shortcut, Start Menu shortcuts (including *MHS Browser Extension Folder*), and Startup/Native Messaging integration",
             "",
-            "### Loading the Browser Extension After Installation (Chrome / Brave / Edge)",
-            "1. Run **``$SetupFileName``** and complete the Setup Wizard (at the final step, Setup automatically copies the installed ``extension`` folder path and can open it directly in File Explorer; you can also open it anytime via **``Help -> Open Browser Extension Folder``**).",
-            "2. Open ``chrome://extensions`` (Chrome) or ``brave://extensions`` (Brave) or ``edge://extensions`` (Edge).",
-            "3. Enable **Developer mode** (top-right).",
-            "4. Click **Load unpacked** and select the **``extension``** folder inside your installation directory (default: ``%LOCALAPPDATA%\Programs\MHS Download Manager\extension``).",
+            "### Loading the Browser Extension from Your Installation Directory",
+            "1. Run **``$SetupVersionedName``** and complete the Setup Wizard — on the final screen, Setup automatically copies `<InstallDir>\extension` to your clipboard and provides **Copy Path** & **Open Folder** buttons (you can also open it anytime from the app via **`Help -> Open Browser Extension Folder`**).",
+            "2. Open ``chrome://extensions`` (Chrome), ``brave://extensions`` (Brave), or ``edge://extensions`` (Edge).",
+            "3. Turn **ON** **Developer mode** (top-right toggle).",
+            "4. Click **Load unpacked** and select the **`extension`** folder inside your installation directory (default: ``%LOCALAPPDATA%\Programs\MHS Download Manager\extension``).",
             "",
-            "### Latest Features Included",
-            "- **Obsidian-Violet Dark Theme (``v1.0.0``)**: Pitch-dark DWM window frames, native dark scrollbars, live search bar, rounded purple-accent cards, ``40px`` borderless rows with inline cyan-to-violet progress bars, and ``MHS Download Manager 1.0.0 (Mehedi Hasan Shihab)`` header branding across all windows and dialogs.",
-            "- **High-Speed YouTube HD/4K & Unthrottled Companion Audio**: Direct InnerTube stream resolution (``144p`` up to ``1080p``/``1440p``/``2160p 4K`` + original ``M4A``/``Opus`` audio) paired with parallel burst-sliced HTTP ``206`` range workers (``1 MiB`` audio / ``4 MiB`` video slices over warm ``KeepAlive`` TLS sockets) so both large videos and long companion audio tracks finish in seconds with live ``Transfer rate`` and ``Time left``.",
-            "- **Exact Selected-Video Tracking & Compact Corner Bar (``↻``)**: Icon-only floating video widget (``[MHS Icon] [1080p · N] | [↻] [▾] [×]``) with one-click Reloader (``↻``) that isolates strictly the selected video on Facebook, Instagram, YouTube, X, TikTok, Reddit, and HTML5 players with exact video captions/titles, resolutions, ``VIDEO``/``AUDIO`` badges, and file sizes.",
-            "- **Zero-Dependency Lossless Video + Audio Muxing**: Built-in C# ISO-BMFF & Matroska muxer (``MP4/fMP4 + M4A -> Fast-Start .mp4``, ``MP4 + WebM Opus -> .mp4``, ``WebM + WebM -> .webm``, ``WebM + M4A -> .mkv``) guaranteeing full audio on adaptive streams while respecting DRM protections.",
-            "- **Automatic Browser Download Interception**: Captures direct and tokenized/redirect downloads (``.mkv``, ``.mp4``, ``.zip``, ``.rar``, ``R0*``, ``.exe``, ``.iso``, etc.) via ``chrome.downloads`` + ``Content-Disposition`` filename resolution, plus automatic Browser Fetch Relay recovery on session-bound ``403`` streams.",
-            "- **Full Download Management Suite**: Dynamic in-flight segment splitting (``1–32`` connections), Pause/Resume, Per-Item & Global Speed Limiter, Queues, Scheduler, Site Grabber spider, Batch Download, ``.ef2``/``.txt`` Import & Export, 9-Tab Options dialog, System Tray integration, and Native Messaging host (``com.shihab.mehedi.idm``).",
+            "### What's New in $TagVer",
+            "- **Outside Top-Right Corner Video Download Bar**: Positions the floating download bar cleanly **outside** the top-right corner of the video (`5px` above the top edge when space exists, or `5px` outside the right edge on full-height Reels/Shorts/TikTok players) so video content is never covered.",
+            "- **Single-Icon DOM Singleton (Zero Overlapping Icons)**: Cross-instance DOM coordination (`shihab-mehedi-idm-supersede` custom event + owner liveness verification + background ping pre-check) guarantees strictly **one** download bar even after extension reloads or SPA navigation.",
+            "- **Subtle Semi-Transparent Glass Styling**: Rests at a sleek `62%` translucent glass finish and smoothly transitions to crisp `96%` opacity on hover or when opening the quality selector.",
+            "- **Verified Unpacked `extension\` in Setup `.exe`**: Setup refreshes and verifies every unpacked extension script inside `<InstallDir>\extension` during installation and adds instant **Copy Path** + **Open Folder** actions on the Finish screen.",
+            "- **High-Speed YouTube HD/4K, Unthrottled Companion Audio & Lossless Muxer**: Direct `144p`–`2160p 4K` resolution + parallel burst-sliced HTTP `206` workers + built-in zero-dependency `MP4` / `WebM` / `MKV` muxer.",
             "",
-            "### SHA-256 Checksum",
-            "| Installer File | SHA-256 |",
-            "| :--- | :--- |",
-            "| ``$SetupFileName`` | ``$SetupSha`` |"
+            "### SHA-256 Checksums",
+            "| Release File | Purpose | SHA-256 |",
+            "| :--- | :--- | :--- |",
+            "| ``$SetupVersionedName`` | Windows x64 Setup Installer (includes ``mdm.exe`` + ``<InstallDir>\extension``) | ``$VersionedSha`` |",
+            "| ``$SetupEvergreenName`` | Evergreen Latest Setup Installer Alias | ``$EvergreenSha`` |",
+            "| ``$ExtArchiveName`` | Standalone Unpacked Browser Extension ZIP (already included inside Setup `.exe`) | ``$ExtZipSha`` |"
           )
           Set-Content -Path (Join-Path $PWD "release-dist\RELEASE_NOTES.md") -Value ($NotesLines -join "`r`n") -Encoding UTF8
+          Write-Output "TAG_VER=$TagVer" >> $env:GITHUB_ENV
 
-      - name: Upload Setup Installer Artifact
+      - name: Upload CI Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: MHS-Download-Manager-Setup-Windows-x64
+          name: MHS-Download-Manager-${{ github.ref_name }}-Windows-x64
           path: |
-            release-dist/MHS-Download-Manager-Setup-*-x64.exe
+            release-dist/MHS-Download-Manager-Setup-*.exe
+            release-dist/MHS-Browser-Extension-*.zip
             release-dist/SHA256SUMS.txt
+            release-dist/RELEASE_NOTES.md
           if-no-files-found: error
 
       - name: Remove Previous Release Entry for Tag (if re-releasing)
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release == true
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view "${{ github.ref_name }}" *> $null
+          gh release view "$env:TAG_VER" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release delete "${{ github.ref_name }}" --yes
+            gh release delete "$env:TAG_VER" --yes
           }
           $global:LASTEXITCODE = 0
 
-      - name: Publish GitHub Release on Version Tag
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Publish Latest GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_release == true
         uses: softprops/action-gh-release@v2
         with:
-          name: "MHS Download Manager ${{ github.ref_name }} (Mehedi Hasan Shihab)"
+          tag_name: ${{ env.TAG_VER }}
+          name: "MHS Download Manager ${{ env.TAG_VER }} (Mehedi Hasan Shihab)"
           body_path: release-dist/RELEASE_NOTES.md
           make_latest: "true"
           files: |
-            release-dist/MHS-Download-Manager-Setup-*-x64.exe
+            release-dist/MHS-Download-Manager-Setup-*.exe
+            release-dist/MHS-Browser-Extension-*.zip
             release-dist/SHA256SUMS.txt
