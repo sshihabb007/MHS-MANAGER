@@ -75,6 +75,10 @@
   let shihabDomObserver = null;
   let mehediLastObservedPageHref = location.href;
   let shihabLocalVidUidCounter = 1;
+  let mehediLastSentGestureMs = 0;
+  let shihabLastSentGestureHref = "";
+  let mehediLastSentAltState = false;
+  let shihabLastSentForceState = false;
 
   // Live bindings from mehedi_page_hook.js (direct DOM <video> fiber identity, byte-exact MSE blob -> URLs, shortcode/altId -> groupKey & caption)
   const shihabVidUidIdentityMap = new Map();
@@ -1002,19 +1006,91 @@
     return false;
   }
 
-  function mehediReportModifierKeys(shihabEvent) {
+  function mehediExtractClickedAnchorHref(shihabEvent) {
+    try {
+      const mehediPath = typeof shihabEvent.composedPath === "function"
+        ? shihabEvent.composedPath()
+        : (shihabEvent.target ? [shihabEvent.target] : []);
+      for (const shihabNode of mehediPath) {
+        if (!shihabNode || typeof shihabNode.tagName !== "string") continue;
+        const mehediTag = shihabNode.tagName.toUpperCase();
+        if (mehediTag === "A" || mehediTag === "AREA") {
+          const shihabRawHref = shihabNode.getAttribute("href") || shihabNode.href || "";
+          if (!shihabRawHref || shihabRawHref.startsWith("javascript:") || shihabRawHref.startsWith("#")) {
+            continue;
+          }
+          const mehediResolved = new URL(shihabRawHref, location.href).href;
+          if (mehediResolved.startsWith("http://") || mehediResolved.startsWith("https://")) {
+            return mehediResolved;
+          }
+        }
+      }
+    } catch (_) {}
+    return "";
+  }
+
+  function mehediReportTrustedUserGesture(shihabEvent) {
+    if (mehediInstanceDisposed) return;
+    if (!shihabIsExtensionContextAlive()) {
+      mehediDisposeCurrentInstance();
+      return;
+    }
+    // Strictly require real physical user input (synthetic script clicks have isTrusted === false)
+    if (!shihabEvent || shihabEvent.isTrusted !== true) {
+      return;
+    }
+
     const shihabPreventHit = mehediCheckConfiguredModifier(shihabEvent, shihabConfiguredPreventKey);
     const mehediForceHit = mehediCheckConfiguredModifier(shihabEvent, mehediConfiguredForceKey);
-    if (shihabPreventHit || mehediForceHit) {
-      try {
-        chrome.runtime.sendMessage({
-          shihabCmd: "mehedi_key_modifier_state",
-          shihabAltPressed: shihabPreventHit,
-          mehediInsertPressed: mehediForceHit
-        }).catch(() => {});
-      } catch (mehediRuntimeErr) {
-        // Extension context reloaded
-      }
+
+    const shihabEvtType = String(shihabEvent.type || "").toLowerCase();
+    let mehediIsDownloadGesture = false;
+    if (shihabEvtType === "pointerdown" || shihabEvtType === "mousedown") {
+      mehediIsDownloadGesture =
+        shihabEvent.button === 0 || shihabEvent.button === 1 || shihabEvent.button === 2;
+    } else if (shihabEvtType === "click" || shihabEvtType === "auxclick" || shihabEvtType === "contextmenu") {
+      mehediIsDownloadGesture = true;
+    } else if (shihabEvtType === "keydown") {
+      const shihabKey = String(shihabEvent.key || "");
+      mehediIsDownloadGesture =
+        shihabKey === "Enter" ||
+        shihabKey === " " ||
+        mehediForceHit ||
+        ((shihabEvent.ctrlKey || shihabEvent.metaKey) &&
+          (shihabKey === "s" || shihabKey === "S" || shihabKey === "j" || shihabKey === "J"));
+    }
+
+    if (!shihabPreventHit && !mehediForceHit && !mehediIsDownloadGesture) {
+      return;
+    }
+
+    const mehediClickedHref = mehediIsDownloadGesture ? mehediExtractClickedAnchorHref(shihabEvent) : "";
+    const shihabNow = Date.now();
+    if (
+      shihabNow - mehediLastSentGestureMs < 160 &&
+      mehediClickedHref === shihabLastSentGestureHref &&
+      shihabPreventHit === mehediLastSentAltState &&
+      mehediForceHit === shihabLastSentForceState
+    ) {
+      return;
+    }
+
+    mehediLastSentGestureMs = shihabNow;
+    shihabLastSentGestureHref = mehediClickedHref;
+    mehediLastSentAltState = shihabPreventHit;
+    shihabLastSentForceState = mehediForceHit;
+
+    try {
+      chrome.runtime.sendMessage({
+        shihabCmd: "mehedi_user_download_gesture",
+        shihabPageUrl: location.href,
+        mehediClickedHref: mehediClickedHref,
+        shihabAltPressed: shihabPreventHit,
+        mehediInsertPressed: mehediForceHit,
+        shihabIsGesture: mehediIsDownloadGesture
+      }).catch(() => {});
+    } catch (mehediRuntimeErr) {
+      // Extension context reloaded
     }
   }
 
@@ -2669,8 +2745,9 @@
     }
     document.removeEventListener(MEHEDI_SUPERSEDE_EVENT, mehediOnSupersedeEvent);
     window.removeEventListener("message", mehediOnPageHookWindowMessage, false);
-    window.removeEventListener("keydown", mehediReportModifierKeys, true);
-    window.removeEventListener("mousedown", mehediReportModifierKeys, true);
+    for (const shihabGestureEvt of ["pointerdown", "mousedown", "click", "auxclick", "contextmenu", "keydown"]) {
+      window.removeEventListener(shihabGestureEvt, mehediReportTrustedUserGesture, true);
+    }
     window.removeEventListener("pointerover", mehediTrackPointerOverVideo, { capture: true });
     window.removeEventListener("pointermove", mehediTrackPointerOverVideo, { capture: true });
     window.removeEventListener("scroll", shihabRenderFloatingIdmVideoPanel, { capture: true });
@@ -2693,8 +2770,11 @@
 
   document.addEventListener(MEHEDI_SUPERSEDE_EVENT, mehediOnSupersedeEvent);
 
-  // Register IPC & MAIN-world postMessage listeners IMMEDIATELY at document_start so zero early manifests are missed!
+  // Register IPC, trusted user-gesture & MAIN-world postMessage listeners IMMEDIATELY at document_start so zero early clicks or manifests are missed!
   window.addEventListener("message", mehediOnPageHookWindowMessage, false);
+  for (const shihabGestureEvt of ["pointerdown", "mousedown", "click", "auxclick", "contextmenu", "keydown"]) {
+    window.addEventListener(shihabGestureEvt, mehediReportTrustedUserGesture, { capture: true, passive: true });
+  }
   try {
     chrome.runtime.onMessage.addListener(mehediOnRuntimeMessage);
   } catch (shihabInitErr) {
@@ -2703,9 +2783,6 @@
 
   function mehediInitDomObservers() {
     if (!shihabVerifyActiveSingletonOwnership()) return;
-
-    window.addEventListener("keydown", mehediReportModifierKeys, true);
-    window.addEventListener("mousedown", mehediReportModifierKeys, true);
 
     try {
       window.postMessage({ __shihabMehediContentPing: true }, "*");

@@ -56,6 +56,9 @@ namespace ShihabMehediIDM
         private string _shihabLastClipboardText = "";
         private bool _mehediBridgeListening = false;
         private bool _shihabExitingExplicitly = false;
+        private readonly Queue<ShihabDownloadItem> _mehediPendingCaptureModalQueue = new Queue<ShihabDownloadItem>();
+        private bool _shihabShowingCaptureModal = false;
+        private readonly Dictionary<string, DateTime> _mehediRecentCapturedUrlsUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
         public ShihabMainIdmWindow(
             ShihabStateStore shihabStore,
@@ -70,6 +73,14 @@ namespace ShihabMehediIDM
             _mehediBridge = mehediBridge;
             _shihabStartupCli = shihabStartupCli;
             _mehediOpenProgressForms = new Dictionary<string, ShihabDownloadProgressForm>();
+            try
+            {
+                if (Clipboard.ContainsText())
+                {
+                    _shihabLastClipboardText = (Clipboard.GetText() ?? "").Trim();
+                }
+            }
+            catch { }
 
             Text = ShihabThemePalette.ShihabMainHeaderTitle;
             Size = new Size(1090, 670);
@@ -1083,8 +1094,41 @@ namespace ShihabMehediIDM
         {
             SafeShihabUiInvoke(delegate
             {
+                if (mehediDto == null || string.IsNullOrWhiteSpace(mehediDto.ShihabUrl))
+                {
+                    return;
+                }
+
+                string shihabTrimmedUrl = mehediDto.ShihabUrl.Trim();
+                DateTime mehediUtcNow = DateTime.UtcNow;
+
+                List<string> shihabExpiredUrls = null;
+                foreach (KeyValuePair<string, DateTime> mehediKv in _mehediRecentCapturedUrlsUtc)
+                {
+                    if ((mehediUtcNow - mehediKv.Value).TotalSeconds > 30.0)
+                    {
+                        if (shihabExpiredUrls == null) shihabExpiredUrls = new List<string>();
+                        shihabExpiredUrls.Add(mehediKv.Key);
+                    }
+                }
+                if (shihabExpiredUrls != null)
+                {
+                    for (int shihabExpIdx = 0; shihabExpIdx < shihabExpiredUrls.Count; shihabExpIdx++)
+                    {
+                        _mehediRecentCapturedUrlsUtc.Remove(shihabExpiredUrls[shihabExpIdx]);
+                    }
+                }
+
+                DateTime shihabPrevSeenUtc;
+                if (_mehediRecentCapturedUrlsUtc.TryGetValue(shihabTrimmedUrl, out shihabPrevSeenUtc) &&
+                    (mehediUtcNow - shihabPrevSeenUtc).TotalSeconds < 4.0)
+                {
+                    return;
+                }
+                _mehediRecentCapturedUrlsUtc[shihabTrimmedUrl] = mehediUtcNow;
+
                 ShihabDownloadItem shihabNewItem = new ShihabDownloadItem();
-                shihabNewItem.MehediUrl = mehediDto.ShihabUrl.Trim();
+                shihabNewItem.MehediUrl = shihabTrimmedUrl;
                 shihabNewItem.MehediReferer = mehediDto.MehediReferrer ?? "";
                 shihabNewItem.ShihabCookies = mehediDto.ShihabCookies ?? "";
                 shihabNewItem.MehediOriginHeader = mehediDto.ShihabOrigin ?? "";
@@ -1139,22 +1183,51 @@ namespace ShihabMehediIDM
                     return;
                 }
 
-                using (MehediDownloadFileInfoForm shihabInfoDlg = new MehediDownloadFileInfoForm(shihabNewItem, _mehediConfig, _shihabEngine))
+                foreach (ShihabDownloadItem mehediQueued in _mehediPendingCaptureModalQueue)
                 {
-                    IWin32Window mehediOwner = GetShihabDialogOwnerOrNull();
-                    if (mehediOwner == null) shihabInfoDlg.StartPosition = FormStartPosition.CenterScreen;
-                    DialogResult shihabDlgRes = mehediOwner != null ? shihabInfoDlg.ShowDialog(mehediOwner) : shihabInfoDlg.ShowDialog();
-                    if (shihabDlgRes == DialogResult.OK)
+                    if (string.Equals(mehediQueued.MehediUrl, shihabNewItem.MehediUrl, StringComparison.OrdinalIgnoreCase))
                     {
-                        _shihabStore.SaveMehediConfig(_mehediConfig);
-                        _shihabEngine.AddShihabDownloadItem(shihabNewItem, shihabInfoDlg.ShihabStartImmediatelySelected);
-                        if (shihabInfoDlg.ShihabStartImmediatelySelected && _mehediConfig.MehediShowDownloadProgressDialog)
+                        return;
+                    }
+                }
+                _mehediPendingCaptureModalQueue.Enqueue(shihabNewItem);
+                PumpNextPendingShihabCaptureModal();
+            });
+        }
+
+        private void PumpNextPendingShihabCaptureModal()
+        {
+            if (_shihabShowingCaptureModal || IsDisposed)
+            {
+                return;
+            }
+            _shihabShowingCaptureModal = true;
+            try
+            {
+                while (_mehediPendingCaptureModalQueue.Count > 0 && !IsDisposed)
+                {
+                    ShihabDownloadItem shihabNextItem = _mehediPendingCaptureModalQueue.Dequeue();
+                    using (MehediDownloadFileInfoForm shihabInfoDlg = new MehediDownloadFileInfoForm(shihabNextItem, _mehediConfig, _shihabEngine))
+                    {
+                        IWin32Window mehediOwner = GetShihabDialogOwnerOrNull();
+                        if (mehediOwner == null) shihabInfoDlg.StartPosition = FormStartPosition.CenterScreen;
+                        DialogResult shihabDlgRes = mehediOwner != null ? shihabInfoDlg.ShowDialog(mehediOwner) : shihabInfoDlg.ShowDialog();
+                        if (shihabDlgRes == DialogResult.OK)
                         {
-                            ShowProgressWindowForShihabItem(shihabNewItem);
+                            _shihabStore.SaveMehediConfig(_mehediConfig);
+                            _shihabEngine.AddShihabDownloadItem(shihabNextItem, shihabInfoDlg.ShihabStartImmediatelySelected);
+                            if (shihabInfoDlg.ShihabStartImmediatelySelected && _mehediConfig.MehediShowDownloadProgressDialog)
+                            {
+                                ShowProgressWindowForShihabItem(shihabNextItem);
+                            }
                         }
                     }
                 }
-            });
+            }
+            finally
+            {
+                _shihabShowingCaptureModal = false;
+            }
         }
 
         private void HandleBrowserMehediBatchCapture(ShihabBatchCaptureDto shihabBatch)

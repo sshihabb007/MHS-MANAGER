@@ -16,7 +16,7 @@ Developed by **[Mehedi Hasan Shihab](https://sshihabb007.github.io/)** (`@sshiha
 
 <br />
 
-[![Download Setup Installer](https://img.shields.io/badge/%E2%AC%87%20Download%20Windows%20x64%20Setup%20Installer-v1.0.1-7C5CFF?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/sshihabb007/MHS-MANAGER/releases/latest/download/MHS-Download-Manager-Setup-x64.exe)
+[![Download Setup Installer](https://img.shields.io/badge/%E2%AC%87%20Download%20Windows%20x64%20Setup%20Installer-v1.0.2-7C5CFF?style=for-the-badge&logo=windows11&logoColor=white)](https://github.com/sshihabb007/MHS-MANAGER/releases/latest/download/MHS-Download-Manager-Setup-x64.exe)
 
 [**Download Installer**](https://github.com/sshihabb007/MHS-MANAGER/releases/latest) · [**Browser Extension Setup**](#extension-setup) · [**Key Features**](#key-features) · [**Architecture**](#architecture) · [**CLI Reference**](#cli-reference) · [**Developer**](#developer)
 
@@ -26,7 +26,7 @@ Developed by **[Mehedi Hasan Shihab](https://sshihabb007.github.io/)** (`@sshiha
 
 ## Overview
 
-**MHS Download Manager (`mdm.exe` v1.0.1)** is a clean-room, open-source Windows x64 download manager and Manifest V3 Chromium browser extension suite crafted in pure C# and vanilla JavaScript by **Mehedi Hasan Shihab**.
+**MHS Download Manager (`mdm.exe` v1.0.2)** is a clean-room, open-source Windows x64 download manager and Manifest V3 Chromium browser extension suite crafted in pure C# and vanilla JavaScript by **Mehedi Hasan Shihab**.
 
 Engineered for maximum throughput and zero bloat, the entire desktop application, custom lossless container muxer, and graphical Windows Setup Wizard compile directly with the inbox Windows `.NET Framework 4.8` compiler (`csc.exe`) — requiring **zero external NuGet packages, zero third-party DLLs, and no external `ffmpeg.exe` installation**.
 
@@ -38,12 +38,12 @@ Engineered for maximum throughput and zero bloat, the entire desktop application
 | Capability | Details |
 | :--- | :--- |
 | **⚡ Dynamic Segment Acceleration (`1–32` Connections)** | Splits transfers across concurrent HTTP `206 Partial Content` `Range` workers and dynamically subdivides the largest remaining active chunk in flight whenever a worker finishes early. Includes checkpointed **Pause / Resume**, **Refresh Download Address**, **SHA-256** integrity verification, and per-item or global **Speed Limiters**. |
-| **🎨 Obsidian-Violet Dark UI (`v1.0.1`)** | Modern pitch-dark interface (`#0F111A` / `#131520`) featuring native Windows 11 DWM dark titlebars, dark Win32 `uxtheme` scrollbars, an instant live search bar, rounded purple-accent cards, `40px` borderless rows, and cyan-to-violet (`#06B6D4` -> `#7C5CFF`) inline progress bars. |
+| **🎨 Obsidian-Violet Dark UI (`v1.0.2`)** | Modern pitch-dark interface (`#0F111A` / `#131520`) featuring native Windows 11 DWM dark titlebars, dark Win32 `uxtheme` scrollbars, an instant live search bar, rounded purple-accent cards, `40px` borderless rows, and cyan-to-violet (`#06B6D4` -> `#7C5CFF`) inline progress bars. |
 | **🎬 Outside-Corner Semi-Transparent Video Bar (`↻`)** | Sleek semi-transparent Shadow DOM widget (`[MHS Icon] [1080p · N] \| [↻] [▾] [×]`) anchored **outside** the top-right corner of the video so playback is never obstructed, backed by a DOM-coordinated singleton (never renders overlapping icons) and one-click **Reloader (`↻`)** to isolate **strictly the video you selected** on Facebook, Instagram, YouTube, X/Twitter, TikTok, Reddit, and HTML5 players. |
 | **🚀 High-Speed YouTube HD/4K & Unthrottled Audio** | Built-in InnerTube stream resolver (`144p` up to `1080p`, `1440p`, and `2160p 4K` + original `M4A`/`Opus` audio) paired with parallel burst-sliced HTTP `206` range workers (`1 MiB` audio / `4 MiB` video slices over warm `KeepAlive` TLS sockets) so both multi-GB videos and long companion audio tracks finish in seconds with live transfer rate and ETA. |
 | **🎞️ Zero-Dependency Lossless Media Muxer** | Pure C# ISO-BMFF & Matroska muxer (`MehediMediaMuxer`) losslessly combines separate adaptive DASH video + audio tracks (`MP4/fMP4 + M4A -> Fast-Start .mp4`, `MP4 + WebM Opus -> .mp4`, `WebM + WebM -> .webm`, `WebM + M4A -> .mkv`) without re-encoding. *(DRM/EME-protected streams are strictly respected and never bypassed.)* |
-| **🌐 Automatic Browser Download Interception** | Intercepts direct, redirected, and extensionless/tokenized downloads (`.mkv`, `.mp4`, `.zip`, `.rar`, `R0*`, `R1*`, `.exe`, `.iso`, `.pdf`, etc.) via `chrome.downloads` + `Content-Disposition` filename resolution, with configurable `Prevent` (`Alt`) / `Force` (`Ins`) keys and automatic **Browser Fetch Relay** recovery when session-bound CDNs return `HTTP 403`. |
-| **🧰 Full Desktop Workflow & Setup Wizard** | Includes **Named Queues**, **Scheduler**, **Site Grabber** web crawler, **Batch Download** generator, `.ef2` / `.txt` **Import & Export**, **9-Tab Options** dialog, **System Tray** integration, and a native **Windows x64 Setup Installer** (`MHS-Download-Manager-Setup-1.0.1-x64.exe`) with clean uninstallation and ready-to-load `<InstallDir>\extension` folder. |
+| **🌐 User-Initiated Browser Download Interception** | Intercepts user-clicked direct, redirected, and tokenized downloads (`.mkv`, `.mp4`, `.zip`, `.rar`, `R0*`, `R1*`, `.exe`, `.iso`, `.pdf`, etc.) via `chrome.downloads` + `Content-Disposition` resolution while blocking browser-startup history replays and unclicked background auto-downloads (`event.isTrusted` + `chrome.storage.session` guard), with `Prevent` (`Alt`) / `Force` (`Ins`) keys and automatic **Browser Fetch Relay** recovery when session-bound CDNs return `HTTP 403`. |
+| **🧰 Full Desktop Workflow & Setup Wizard** | Includes **Named Queues**, **Scheduler**, **Site Grabber** web crawler, **Batch Download** generator, `.ef2` / `.txt` **Import & Export**, **9-Tab Options** dialog, **System Tray** integration, and a native **Windows x64 Setup Installer** (`MHS-Download-Manager-Setup-1.0.2-x64.exe`) with clean uninstallation and ready-to-load `<InstallDir>\extension` folder. |
 
 ---
 
@@ -51,13 +51,13 @@ Engineered for maximum throughput and zero bloat, the entire desktop application
 
 ### 1. Install MHS Download Manager (Windows 10 / 11 x64)
 
-1. Download **[`MHS-Download-Manager-Setup-1.0.1-x64.exe`](https://github.com/sshihabb007/MHS-MANAGER/releases/latest/download/MHS-Download-Manager-Setup-1.0.1-x64.exe)** (or evergreen [`MHS-Download-Manager-Setup-x64.exe`](https://github.com/sshihabb007/MHS-MANAGER/releases/latest/download/MHS-Download-Manager-Setup-x64.exe)) from [**GitHub Releases**](https://github.com/sshihabb007/MHS-MANAGER/releases/latest).
+1. Download **[`MHS-Download-Manager-Setup-1.0.2-x64.exe`](https://github.com/sshihabb007/MHS-MANAGER/releases/latest/download/MHS-Download-Manager-Setup-1.0.2-x64.exe)** (or evergreen [`MHS-Download-Manager-Setup-x64.exe`](https://github.com/sshihabb007/MHS-MANAGER/releases/latest/download/MHS-Download-Manager-Setup-x64.exe)) from [**GitHub Releases**](https://github.com/sshihabb007/MHS-MANAGER/releases/latest).
 2. Run the Setup Wizard and choose your preferred installation folder (default: `%LOCALAPPDATA%\Programs\MHS Download Manager`).
 3. Setup installs the desktop app, shortcuts, Native Messaging registration, *Installed Apps* uninstaller, and keeps the ready-to-load **`extension\`** folder directly inside your installation directory:
 
 ```text
 <InstallDir>\
-├── mdm.exe          # MHS Download Manager 1.0.1 (x64 Desktop Application)
+├── mdm.exe          # MHS Download Manager 1.0.2 (x64 Desktop Application)
 ├── extension\       # Unpacked Browser Extension for Chrome, Brave, Edge & Opera
 ├── Uninstall.exe    # Official Windows Uninstaller
 ├── README.md        # Documentation
@@ -124,7 +124,7 @@ MHS-MANAGER/
 │   ├── mdm.ico                             # Multi-resolution application & installer icon
 │   └── mdm.png                             # High-resolution brand logo
 ├── extension/                              # Manifest V3 Browser Extension (bundled into Setup)
-│   ├── manifest.json                       # MV3 manifest (v1.0.1)
+│   ├── manifest.json                       # MV3 manifest (v1.0.2)
 │   ├── mehedi_page_hook.js                 # MSE/XHR/fetch & player stream hook
 │   ├── mehedi_content.js                   # Floating video bar & single-video isolation
 │   ├── shihab_background.js                # Download interception & Browser Fetch Relay
@@ -158,13 +158,13 @@ No Visual Studio workload, NuGet restore, or external SDK is required — any st
 git clone https://github.com/sshihabb007/MHS-MANAGER.git
 cd MHS-MANAGER
 
-# Compile both bin\mdm.exe and bin\MHS-Download-Manager-Setup-1.0.1-x64.exe
+# Compile both bin\mdm.exe and bin\MHS-Download-Manager-Setup-1.0.2-x64.exe
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
 Build outputs generated in `bin\`:
 - `bin\mdm.exe` — Main x64 desktop application
-- `bin\MHS-Download-Manager-Setup-1.0.1-x64.exe` — Standalone Windows x64 Setup Installer (embeds `mdm.exe`, `extension\`, `README.md`, and `LICENSE`)
+- `bin\MHS-Download-Manager-Setup-1.0.2-x64.exe` — Standalone Windows x64 Setup Installer (embeds `mdm.exe`, `extension\`, `README.md`, and `LICENSE`)
 
 ---
 
@@ -187,10 +187,10 @@ mdm.exe /d <URL> [/p <LocalPath>] [/f <LocalFileName>] [/n] [/q] [/a] [/s]
 | `/a` | Add the file to the download queue without starting immediately |
 | `/s` | Start the active download queue immediately |
 
-### Setup Installer CLI (`MHS-Download-Manager-Setup-1.0.1-x64.exe`)
+### Setup Installer CLI (`MHS-Download-Manager-Setup-1.0.2-x64.exe`)
 
 ```text
-MHS-Download-Manager-Setup-1.0.1-x64.exe [--shihab-silent] [--shihab-install-dir <Path>] [--shihab-no-registry]
+MHS-Download-Manager-Setup-1.0.2-x64.exe [--shihab-silent] [--shihab-install-dir <Path>] [--shihab-no-registry]
 ```
 
 | Flag | Description |

@@ -76,7 +76,16 @@ const shihabRuntimeState = {
   mehediActiveRelayJobIds: new Set(),
   shihabHandledDownloadIds: new Set(),
   mehediInterceptingDownloadIds: new Set(),
-  shihabInFlightYtResolves: new Map()
+  shihabInFlightYtResolves: new Map(),
+  shihabWorkerBootMs: Date.now(),
+  mehediBrowserStartupUntilMs: 0,
+  mehediHasTrustedClickInSession: false,
+  mehediLastTrustedGestureGlobalMs: 0,
+  mehediTrustedGestureUntilByTab: new Map(),
+  mehediTrustedGestureByHost: new Map(),
+  mehediTrustedClickedUrls: new Map(),
+  mehediUserCreatedNewTabs: new Map(),
+  mehediRequestSourceTabByUrl: new Map()
 };
 
 function shihabIsPoisonedYouTubeWebUrl(mehediRawUrl) {
@@ -1621,6 +1630,161 @@ function mehediInstallContextMenus() {
   });
 }
 
+let shihabInitialDownloadsSeedPromise = null;
+
+function shihabPruneExpiredGestureMaps(mehediNowMs) {
+  for (const [shihabTabK, mehediExp] of shihabRuntimeState.mehediTrustedGestureUntilByTab.entries()) {
+    if (mehediExp <= mehediNowMs) shihabRuntimeState.mehediTrustedGestureUntilByTab.delete(shihabTabK);
+  }
+  for (const [shihabHostK, mehediExp] of shihabRuntimeState.mehediTrustedGestureByHost.entries()) {
+    if (mehediExp <= mehediNowMs) shihabRuntimeState.mehediTrustedGestureByHost.delete(shihabHostK);
+  }
+  for (const [shihabUrlK, mehediExp] of shihabRuntimeState.mehediTrustedClickedUrls.entries()) {
+    if (mehediExp <= mehediNowMs) shihabRuntimeState.mehediTrustedClickedUrls.delete(shihabUrlK);
+  }
+  for (const [shihabNewTabK, mehediCreated] of shihabRuntimeState.mehediUserCreatedNewTabs.entries()) {
+    if (mehediNowMs - mehediCreated > 45000) shihabRuntimeState.mehediUserCreatedNewTabs.delete(shihabNewTabK);
+  }
+}
+
+function shihabPersistSessionDownloadState() {
+  if (!chrome.storage || !chrome.storage.session) return;
+  const mehediNow = Date.now();
+  shihabPruneExpiredGestureMaps(mehediNow);
+  chrome.storage.session.set({
+    shihabSessionBootDone: true,
+    mehediBrowserStartupUntilMs: shihabRuntimeState.mehediBrowserStartupUntilMs,
+    mehediHasTrustedClickInSession: shihabRuntimeState.mehediHasTrustedClickInSession,
+    shihabHandledIds: Array.from(shihabRuntimeState.shihabHandledDownloadIds).slice(-500),
+    mehediTabGestures: Array.from(shihabRuntimeState.mehediTrustedGestureUntilByTab.entries()),
+    mehediHostGestures: Array.from(shihabRuntimeState.mehediTrustedGestureByHost.entries()),
+    mehediClickedUrls: Array.from(shihabRuntimeState.mehediTrustedClickedUrls.entries())
+  }).catch(() => {});
+}
+
+function shihabMarkDownloadIdHandled(mehediDlId) {
+  if (typeof mehediDlId !== "number") return;
+  shihabRuntimeState.shihabHandledDownloadIds.add(mehediDlId);
+  while (shihabRuntimeState.shihabHandledDownloadIds.size > 500) {
+    const shihabOldest = shihabRuntimeState.shihabHandledDownloadIds.values().next().value;
+    shihabRuntimeState.shihabHandledDownloadIds.delete(shihabOldest);
+  }
+  shihabPersistSessionDownloadState();
+}
+
+function mehediRecordTrustedUserGesture(shihabTabId, mehediPageUrl, shihabClickedHref) {
+  const mehediNow = Date.now();
+  shihabRuntimeState.mehediHasTrustedClickInSession = true;
+  shihabRuntimeState.mehediLastTrustedGestureGlobalMs = mehediNow;
+  shihabRuntimeState.mehediBrowserStartupUntilMs = 0;
+
+  if (typeof shihabTabId === "number" && shihabTabId >= 0) {
+    shihabRuntimeState.mehediTrustedGestureUntilByTab.set(shihabTabId, mehediNow + 15000);
+  }
+  for (const shihabCandidateUrl of [mehediPageUrl, shihabClickedHref]) {
+    if (!shihabCandidateUrl || typeof shihabCandidateUrl !== "string") continue;
+    try {
+      const mehediHost = new URL(shihabCandidateUrl).hostname.toLowerCase();
+      if (mehediHost) {
+        shihabRuntimeState.mehediTrustedGestureByHost.set(mehediHost, mehediNow + 15000);
+      }
+    } catch (_) {}
+  }
+  if (shihabClickedHref && (shihabClickedHref.startsWith("http://") || shihabClickedHref.startsWith("https://"))) {
+    shihabRuntimeState.mehediTrustedClickedUrls.set(shihabClickedHref, mehediNow + 30000);
+  }
+  shihabPersistSessionDownloadState();
+}
+
+async function mehediInitializeDownloadSessionGuard(shihabForceFreshBrowserBoot) {
+  const mehediNow = Date.now();
+  let shihabIsFreshBrowserLaunch = Boolean(shihabForceFreshBrowserBoot);
+
+  if (chrome.storage && chrome.storage.session) {
+    try {
+      const mehediSess = await chrome.storage.session.get([
+        "shihabSessionBootDone",
+        "mehediBrowserStartupUntilMs",
+        "mehediHasTrustedClickInSession",
+        "shihabHandledIds",
+        "mehediTabGestures",
+        "mehediHostGestures",
+        "mehediClickedUrls"
+      ]);
+      if (!shihabForceFreshBrowserBoot && mehediSess && mehediSess.shihabSessionBootDone) {
+        shihabRuntimeState.mehediBrowserStartupUntilMs = Number(mehediSess.mehediBrowserStartupUntilMs || 0);
+        shihabRuntimeState.mehediHasTrustedClickInSession = Boolean(mehediSess.mehediHasTrustedClickInSession);
+        if (Array.isArray(mehediSess.shihabHandledIds)) {
+          for (const shihabOldId of mehediSess.shihabHandledIds) {
+            if (typeof shihabOldId === "number") shihabRuntimeState.shihabHandledDownloadIds.add(shihabOldId);
+          }
+        }
+        if (Array.isArray(mehediSess.mehediTabGestures)) {
+          for (const [mehediTId, shihabExp] of mehediSess.mehediTabGestures) {
+            if (shihabExp > mehediNow) shihabRuntimeState.mehediTrustedGestureUntilByTab.set(mehediTId, shihabExp);
+          }
+        }
+        if (Array.isArray(mehediSess.mehediHostGestures)) {
+          for (const [mehediHost, shihabExp] of mehediSess.mehediHostGestures) {
+            if (shihabExp > mehediNow) shihabRuntimeState.mehediTrustedGestureByHost.set(mehediHost, shihabExp);
+          }
+        }
+        if (Array.isArray(mehediSess.mehediClickedUrls)) {
+          for (const [mehediU, shihabExp] of mehediSess.mehediClickedUrls) {
+            if (shihabExp > mehediNow) shihabRuntimeState.mehediTrustedClickedUrls.set(mehediU, shihabExp);
+          }
+        }
+      } else {
+        shihabIsFreshBrowserLaunch = true;
+      }
+    } catch (_) {
+      shihabIsFreshBrowserLaunch = true;
+    }
+  } else if (shihabForceFreshBrowserBoot) {
+    shihabIsFreshBrowserLaunch = true;
+  }
+
+  if (shihabIsFreshBrowserLaunch) {
+    shihabRuntimeState.mehediBrowserStartupUntilMs = Date.now() + 10000;
+    shihabRuntimeState.mehediHasTrustedClickInSession = false;
+    shihabRuntimeState.mehediTrustedGestureUntilByTab.clear();
+    shihabRuntimeState.mehediTrustedGestureByHost.clear();
+    shihabRuntimeState.mehediTrustedClickedUrls.clear();
+    shihabRuntimeState.mehediUserCreatedNewTabs.clear();
+  }
+
+  try {
+    const mehediExistingDownloads = await new Promise((shihabResolve) => {
+      try {
+        chrome.downloads.search({}, (mehediList) => shihabResolve(Array.isArray(mehediList) ? mehediList : []));
+      } catch (_) {
+        shihabResolve([]);
+      }
+    });
+    const shihabScanNow = Date.now();
+    for (const mehediItem of mehediExistingDownloads) {
+      if (!mehediItem || typeof mehediItem.id !== "number") continue;
+      if (shihabIsFreshBrowserLaunch) {
+        shihabRuntimeState.shihabHandledDownloadIds.add(mehediItem.id);
+        continue;
+      }
+      const shihabItemStartMs = mehediItem.startTime ? Date.parse(mehediItem.startTime) : NaN;
+      const mehediIsHistoricalOrInactive =
+        mehediItem.state !== "in_progress" ||
+        Boolean(mehediItem.paused) ||
+        Boolean(mehediItem.error) ||
+        (!Number.isNaN(shihabItemStartMs) && (shihabScanNow - shihabItemStartMs) > 6000);
+      if (mehediIsHistoricalOrInactive) {
+        shihabRuntimeState.shihabHandledDownloadIds.add(mehediItem.id);
+      }
+    }
+  } catch (_) {}
+
+  shihabPersistSessionDownloadState();
+}
+
+shihabInitialDownloadsSeedPromise = mehediInitializeDownloadSessionGuard(false);
+
 chrome.storage.local.get(["mehediShowVideoPanelPref"]).then((shihabStored) => {
   if (shihabStored && typeof shihabStored.mehediShowVideoPanelPref === "boolean") {
     shihabRuntimeState.mehediShowVideoPanel = shihabStored.mehediShowVideoPanelPref;
@@ -1630,14 +1794,48 @@ chrome.storage.local.get(["mehediShowVideoPanelPref"]).then((shihabStored) => {
 shihabSyncDesktopConfiguration();
 
 chrome.runtime.onInstalled.addListener(() => {
+  shihabInitialDownloadsSeedPromise = mehediInitializeDownloadSessionGuard(false);
   mehediInstallContextMenus();
   shihabSyncDesktopConfiguration();
   shihabInjectContentScriptIntoExistingTabs();
 });
 
 chrome.runtime.onStartup.addListener(() => {
+  shihabInitialDownloadsSeedPromise = mehediInitializeDownloadSessionGuard(true);
   mehediInstallContextMenus();
   shihabSyncDesktopConfiguration();
+});
+
+chrome.tabs.onCreated.addListener((shihabNewTab) => {
+  if (!shihabNewTab || typeof shihabNewTab.id !== "number" || shihabNewTab.id < 0) return;
+  const mehediNow = Date.now();
+  shihabPruneExpiredGestureMaps(mehediNow);
+
+  const shihabOpenerId = typeof shihabNewTab.openerTabId === "number" ? shihabNewTab.openerTabId : -1;
+  const mehediOpenerGestureUntil = shihabOpenerId >= 0
+    ? (shihabRuntimeState.mehediTrustedGestureUntilByTab.get(shihabOpenerId) || 0)
+    : 0;
+
+  if (
+    mehediOpenerGestureUntil > mehediNow ||
+    (shihabRuntimeState.mehediHasTrustedClickInSession && (mehediNow - shihabRuntimeState.mehediLastTrustedGestureGlobalMs) < 3500)
+  ) {
+    // Popup / target="_blank" download tab spawned directly from a user click
+    shihabRuntimeState.mehediTrustedGestureUntilByTab.set(shihabNewTab.id, mehediNow + 15000);
+    shihabPersistSessionDownloadState();
+    return;
+  }
+
+  if (mehediNow > shihabRuntimeState.mehediBrowserStartupUntilMs) {
+    const shihabInitialUrl = String(shihabNewTab.pendingUrl || shihabNewTab.url || "").toLowerCase();
+    if (
+      !shihabInitialUrl ||
+      shihabInitialUrl === "about:blank" ||
+      shihabInitialUrl.includes("://newtab")
+    ) {
+      shihabRuntimeState.mehediUserCreatedNewTabs.set(shihabNewTab.id, mehediNow);
+    }
+  }
 });
 
 chrome.contextMenus.onClicked.addListener(async (shihabInfo, mehediTab) => {
@@ -1696,6 +1894,100 @@ function shihabWildcardMatchAddress(mehediFullUrl, shihabPatternsList) {
   return false;
 }
 
+async function mehediCheckExplicitUserIntentOnce(mehediDownloadItem, shihabFinalUrl, mehediForceActive) {
+  if (mehediForceActive) return true;
+
+  const shihabNow = Date.now();
+  shihabPruneExpiredGestureMaps(shihabNow);
+
+  const mehediInitialUrl = mehediDownloadItem.url || "";
+  if (
+    (mehediInitialUrl && (shihabRuntimeState.mehediTrustedClickedUrls.get(mehediInitialUrl) || 0) > shihabNow) ||
+    (shihabFinalUrl && (shihabRuntimeState.mehediTrustedClickedUrls.get(shihabFinalUrl) || 0) > shihabNow)
+  ) {
+    return true;
+  }
+
+  const shihabSourceRec =
+    (mehediInitialUrl && shihabRuntimeState.mehediRequestSourceTabByUrl.get(mehediInitialUrl)) ||
+    (shihabFinalUrl && shihabRuntimeState.mehediRequestSourceTabByUrl.get(shihabFinalUrl)) ||
+    null;
+  const mehediKnownTabId =
+    shihabSourceRec && (shihabNow - shihabSourceRec.mehediSeenAtMs) < 60000
+      ? shihabSourceRec.shihabTabId
+      : -1;
+
+  if (mehediKnownTabId >= 0) {
+    if ((shihabRuntimeState.mehediTrustedGestureUntilByTab.get(mehediKnownTabId) || 0) > shihabNow) {
+      return true;
+    }
+    if (
+      shihabNow > shihabRuntimeState.mehediBrowserStartupUntilMs &&
+      !mehediDownloadItem.referrer &&
+      shihabRuntimeState.mehediUserCreatedNewTabs.has(mehediKnownTabId)
+    ) {
+      return true;
+    }
+    // Request originated from a known tab where the user has NOT clicked (e.g. session-restored or auto-redirect tab)
+    return false;
+  }
+
+  // Fallback for browser-detached downloads (tabId === -1)
+  if (shihabNow <= shihabRuntimeState.mehediBrowserStartupUntilMs && !shihabRuntimeState.mehediHasTrustedClickInSession) {
+    return false;
+  }
+
+  if (mehediDownloadItem.referrer) {
+    try {
+      const shihabRefHost = new URL(mehediDownloadItem.referrer).hostname.toLowerCase();
+      if (shihabRefHost && (shihabRuntimeState.mehediTrustedGestureByHost.get(shihabRefHost) || 0) > shihabNow) {
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  try {
+    const mehediActiveTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const shihabActiveTab = mehediActiveTabs && mehediActiveTabs[0] ? mehediActiveTabs[0] : null;
+    if (shihabActiveTab && typeof shihabActiveTab.id === "number") {
+      if ((shihabRuntimeState.mehediTrustedGestureUntilByTab.get(shihabActiveTab.id) || 0) > shihabNow) {
+        return true;
+      }
+      const mehediTabUrl = String(shihabActiveTab.pendingUrl || shihabActiveTab.url || "").toLowerCase();
+      if (
+        shihabNow > shihabRuntimeState.mehediBrowserStartupUntilMs &&
+        shihabRuntimeState.mehediUserCreatedNewTabs.has(shihabActiveTab.id) &&
+        (shihabActiveTab.pendingUrl === shihabFinalUrl ||
+          shihabActiveTab.pendingUrl === mehediInitialUrl ||
+          mehediTabUrl === "about:blank" ||
+          mehediTabUrl.includes("://newtab"))
+      ) {
+        return true;
+      }
+    }
+  } catch (_) {}
+
+  return false;
+}
+
+async function mehediVerifyDownloadUserIntentWithGrace(mehediDownloadItem, shihabFinalUrl, mehediForceActive) {
+  if (await mehediCheckExplicitUserIntentOnce(mehediDownloadItem, shihabFinalUrl, mehediForceActive)) {
+    return true;
+  }
+  const shihabNow = Date.now();
+  const mehediStartMs = mehediDownloadItem.startTime ? Date.parse(mehediDownloadItem.startTime) : NaN;
+  // Allow a brief 220ms IPC window when NOT in browser-startup restore in case a waking tab's click message is in flight
+  if (
+    shihabNow > shihabRuntimeState.mehediBrowserStartupUntilMs &&
+    (Number.isNaN(mehediStartMs) || (shihabNow - mehediStartMs) < 3000)
+  ) {
+    await new Promise((shihabResolve) => setTimeout(shihabResolve, 220));
+    return mehediCheckExplicitUserIntentOnce(mehediDownloadItem, shihabFinalUrl, mehediForceActive);
+  }
+  return false;
+}
+
 async function shihabTryInterceptBrowserDownload(mehediDownloadItem) {
   if (!mehediDownloadItem || typeof mehediDownloadItem.id !== "number") {
     return false;
@@ -1706,11 +1998,35 @@ async function shihabTryInterceptBrowserDownload(mehediDownloadItem) {
     return false;
   }
 
+  // Never intercept historical, completed, interrupted, paused, or old downloads replayed on browser startup
+  if (mehediDownloadItem.state && mehediDownloadItem.state !== "in_progress") {
+    shihabMarkDownloadIdHandled(shihabDlId);
+    return false;
+  }
+  if (mehediDownloadItem.paused || mehediDownloadItem.error) {
+    shihabMarkDownloadIdHandled(shihabDlId);
+    return false;
+  }
+  const mehediStartMs = mehediDownloadItem.startTime ? Date.parse(mehediDownloadItem.startTime) : NaN;
+  if (!Number.isNaN(mehediStartMs) && (Date.now() - mehediStartMs) > 15000) {
+    shihabMarkDownloadIdHandled(shihabDlId);
+    return false;
+  }
+
+  if (shihabInitialDownloadsSeedPromise) {
+    await shihabInitialDownloadsSeedPromise;
+    if (shihabRuntimeState.shihabHandledDownloadIds.has(shihabDlId) ||
+        shihabRuntimeState.mehediInterceptingDownloadIds.has(shihabDlId)) {
+      return false;
+    }
+  }
+
   const shihabFinalUrl = mehediDownloadItem.finalUrl || mehediDownloadItem.url || "";
   if (!shihabFinalUrl.startsWith("http://") && !shihabFinalUrl.startsWith("https://")) {
     return false;
   }
   if (mehediDownloadItem.byExtensionId && mehediDownloadItem.byExtensionId === chrome.runtime.id) {
+    shihabMarkDownloadIdHandled(shihabDlId);
     return false;
   }
 
@@ -1737,7 +2053,7 @@ async function shihabTryInterceptBrowserDownload(mehediDownloadItem) {
 
   for (const [, shihabBypassUntil] of shihabRuntimeState.mehediAltBypassUntilMsByTab.entries()) {
     if (Date.now() < shihabBypassUntil) {
-      shihabRuntimeState.shihabHandledDownloadIds.add(shihabDlId);
+      shihabMarkDownloadIdHandled(shihabDlId);
       return false;
     }
   }
@@ -1766,6 +2082,17 @@ async function shihabTryInterceptBrowserDownload(mehediDownloadItem) {
 
   shihabRuntimeState.mehediInterceptingDownloadIds.add(shihabDlId);
   try {
+    // Require explicit user click / download gesture — block all startup session-restore & unsolicited auto-downloads!
+    const shihabUserInitiated = await mehediVerifyDownloadUserIntentWithGrace(
+      mehediDownloadItem,
+      shihabFinalUrl,
+      mehediForceActive
+    );
+    if (!shihabUserInitiated) {
+      shihabMarkDownloadIdHandled(shihabDlId);
+      return false;
+    }
+
     const mehediPing = await shihabSyncDesktopConfiguration(true);
     if (!mehediPing || !mehediPing.ok || !shihabRuntimeState.shihabIntegrationEnabled) {
       return false;
@@ -1773,11 +2100,11 @@ async function shihabTryInterceptBrowserDownload(mehediDownloadItem) {
 
     if (!mehediForceActive) {
       if (mehediWildcardMatchHost(shihabHostname, shihabRuntimeState.shihabExcludedPatterns)) {
-        shihabRuntimeState.shihabHandledDownloadIds.add(shihabDlId);
+        shihabMarkDownloadIdHandled(shihabDlId);
         return false;
       }
       if (shihabWildcardMatchAddress(shihabFinalUrl, shihabRuntimeState.mehediExcludedAddressPatterns)) {
-        shihabRuntimeState.shihabHandledDownloadIds.add(shihabDlId);
+        shihabMarkDownloadIdHandled(shihabDlId);
         return false;
       }
       if (!mehediMatchesConfiguredExtension(shihabExt)) {
@@ -1785,11 +2112,7 @@ async function shihabTryInterceptBrowserDownload(mehediDownloadItem) {
       }
     }
 
-    shihabRuntimeState.shihabHandledDownloadIds.add(shihabDlId);
-    if (shihabRuntimeState.shihabHandledDownloadIds.size > 500) {
-      const mehediOldestId = shihabRuntimeState.shihabHandledDownloadIds.values().next().value;
-      shihabRuntimeState.shihabHandledDownloadIds.delete(mehediOldestId);
-    }
+    shihabMarkDownloadIdHandled(shihabDlId);
 
     let mehediResolvedFile = shihabLeafFilename;
     if (!mehediResolvedFile && shihabExt) {
@@ -1848,6 +2171,10 @@ if (chrome.downloads && chrome.downloads.onDeterminingFilename) {
 
 chrome.downloads.onChanged.addListener((shihabDelta) => {
   if (!shihabDelta || typeof shihabDelta.id !== "number") return;
+  if (shihabDelta.state && shihabDelta.state.current && shihabDelta.state.current !== "in_progress") {
+    shihabMarkDownloadIdHandled(shihabDelta.id);
+    return;
+  }
   if (!shihabDelta.filename && !shihabDelta.mime && !shihabDelta.finalUrl) return;
   if (shihabRuntimeState.shihabHandledDownloadIds.has(shihabDelta.id)) return;
   chrome.downloads.search({ id: shihabDelta.id }, (mehediItems) => {
@@ -1873,6 +2200,14 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   (mehediReqDetails) => {
     if (!mehediReqDetails || mehediReqDetails.tabId < 0 || !mehediReqDetails.url.startsWith("http")) {
       return;
+    }
+    shihabRuntimeState.mehediRequestSourceTabByUrl.set(mehediReqDetails.url, {
+      shihabTabId: mehediReqDetails.tabId,
+      mehediSeenAtMs: Date.now()
+    });
+    if (shihabRuntimeState.mehediRequestSourceTabByUrl.size > 500) {
+      const mehediOldestReqUrl = shihabRuntimeState.mehediRequestSourceTabByUrl.keys().next().value;
+      shihabRuntimeState.mehediRequestSourceTabByUrl.delete(mehediOldestReqUrl);
     }
     const shihabNorm = shihabNormalizeMediaStreamUrl(mehediReqDetails.url).shihabCleanUrl;
     let mehediOrigin = "";
@@ -2037,6 +2372,8 @@ chrome.tabs.onRemoved.addListener((shihabTabId) => {
   shihabRuntimeState.mehediDetectedStreamsByTab.delete(shihabTabId);
   shihabRuntimeState.mehediAltBypassUntilMsByTab.delete(shihabTabId);
   shihabRuntimeState.shihabForceCaptureUntilMsByTab.delete(shihabTabId);
+  shihabRuntimeState.mehediTrustedGestureUntilByTab.delete(shihabTabId);
+  shihabRuntimeState.mehediUserCreatedNewTabs.delete(shihabTabId);
 });
 
 function mehediUpdateToolbarBadgeForTab(shihabSpecificTabId) {
@@ -2279,12 +2616,23 @@ chrome.runtime.onMessage.addListener((shihabMsg, mehediSender, shihabSendRespons
     return false;
   }
 
-  if (shihabMsg && shihabMsg.shihabCmd === "mehedi_key_modifier_state" && mehediTabId >= 0) {
+  if (
+    shihabMsg &&
+    (shihabMsg.shihabCmd === "mehedi_user_download_gesture" || shihabMsg.shihabCmd === "mehedi_key_modifier_state") &&
+    mehediTabId >= 0
+  ) {
     if (shihabMsg.shihabAltPressed) {
       shihabRuntimeState.mehediAltBypassUntilMsByTab.set(mehediTabId, Date.now() + 2500);
     }
     if (shihabMsg.mehediInsertPressed) {
       shihabRuntimeState.shihabForceCaptureUntilMsByTab.set(mehediTabId, Date.now() + 2500);
+    }
+    if (shihabMsg.shihabCmd === "mehedi_user_download_gesture" && shihabMsg.shihabIsGesture !== false) {
+      mehediRecordTrustedUserGesture(
+        mehediTabId,
+        String(shihabMsg.shihabPageUrl || (mehediSender && mehediSender.tab ? mehediSender.tab.url : "") || ""),
+        String(shihabMsg.mehediClickedHref || "")
+      );
     }
     shihabSendResponse({ ok: true });
     return false;
